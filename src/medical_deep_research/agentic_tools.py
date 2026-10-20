@@ -55,6 +55,7 @@ from .research.planning import (
     suggest_databases as _suggest_databases,
 )
 from .research.search import POLITE_EMAIL, USER_AGENT
+from .languages import language_display_name, language_style_note, report_language_instruction
 from .models import RunRequest
 
 _log = logging.getLogger(__name__)
@@ -1071,6 +1072,10 @@ _REPORT_META_PATTERNS = [
         r"\bhere is (a|the) summary\b",
         r"완료했습니다",
         r"완료하였습니다",
+        r"\bperfeito[!.]",
+        r"\bconcluí com sucesso\b",
+        r"\bo relatório completo (está )?(acima|abaixo)\b",
+        r"\baqui está (o|um) resumo\b",
     )
 ]
 
@@ -1080,6 +1085,10 @@ _REPORT_SECTION_GROUPS: dict[str, tuple[str, ...]] = {
         "summary",
         "요약",
         "핵심 요약",
+        "resumo executivo",
+        "sumário executivo",
+        "resumo",
+        "síntese",
     ),
     "background": (
         "background",
@@ -1087,34 +1096,48 @@ _REPORT_SECTION_GROUPS: dict[str, tuple[str, ...]] = {
         "background and context",
         "context",
         "배경",
+        "contexto",
+        "introdução",
+        "antecedentes",
     ),
     "methods": (
         "methods",
         "search strategy",
         "방법",
         "검색 전략",
+        "métodos",
+        "metodologia",
+        "estratégia de busca",
     ),
     "results": (
         "results",
         "findings",
         "결과",
         "근거",
+        "resultados",
+        "achados",
     ),
     "discussion": (
         "discussion",
         "논의",
         "고찰",
+        "discussão",
     ),
     "conclusions": (
         "conclusion",
         "conclusions",
         "결론",
+        "conclusões",
+        "conclusão",
     ),
     "references": (
         "references",
         "bibliography",
         "참고문헌",
         "참고 문헌",
+        "referências bibliográficas",
+        "referências",
+        "bibliografia",
     ),
 }
 
@@ -1130,9 +1153,10 @@ _NUMBERED_REPORT_SECTIONS: tuple[tuple[int, str], ...] = (
 
 
 def _report_word_count(text: str) -> int:
-    """Approximate report length across English and common CJK report text."""
+    """Approximate report length across Latin-script (incl. accented) and common CJK report text."""
     tokens = re.findall(
-        r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)?|[\uac00-\ud7af]+|[\u3040-\u30ff]+|[\u4e00-\u9fff]",
+        r"[A-Za-z\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u00ff0-9]+(?:[-'][A-Za-z\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u00ff0-9]+)?"
+        r"|[\uac00-\ud7af]+|[\u3040-\u30ff]+|[\u4e00-\u9fff]",
         text,
     )
     return len(tokens)
@@ -1282,7 +1306,7 @@ MAX_SUBMIT_REPORT_REJECTIONS = 3
 
 _EVIDENCE_LEVEL_RE = re.compile(r"\bLevel\s+(IV|III|II|I|V)\b", re.IGNORECASE)
 _EVIDENCE_LEVEL_ORDER = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5}
-_CERTAINTY_RE = re.compile(r"certaint|grade|확실성", re.IGNORECASE)
+_CERTAINTY_RE = re.compile(r"certaint|grade|확실성|certeza", re.IGNORECASE)
 # Soft issues let weak local models pass after the 3rd attempt (see soft-accept path).
 _SOFT_REPORT_QUALITY_ISSUES = {EVIDENCE_LEVEL_ORDER_ISSUE, GRADE_CERTAINTY_ISSUE}
 
@@ -1298,6 +1322,9 @@ def _evidence_level_order_issues(report_markdown: str) -> list[str]:
             "limitations",
             "implications",
             "recommendations",
+            "limitações",
+            "implicações",
+            "recomendações",
         ),
     )
     if not findings:
@@ -1526,9 +1553,8 @@ async def tool_translate_report(
 
 
 def _build_translation_prompt(target_language: str) -> str:
-    lang_name = {"ko": "Korean (한국어)", "ja": "Japanese (日本語)", "zh": "Chinese (中文)"}.get(
-        target_language, target_language,
-    )
+    lang_name = language_display_name(target_language)
+    style_note = language_style_note(target_language)
 
     return f"""\
 You are a medical research translator specializing in accurate, professional translation.
@@ -1558,7 +1584,8 @@ The following MUST remain in English without translation:
 - Use formal academic style
 - Use appropriate medical terminology in the target language where standard terms exist
 - Maintain scientific precision and objectivity
-- Keep sentences clear and concise"""
+- Keep sentences clear and concise
+{style_note}"""
 
 
 async def _call_llm_for_translation(
@@ -1567,8 +1594,9 @@ async def _call_llm_for_translation(
     api_keys: dict[str, str],
     system_prompt: str,
     report: str,
+    user_instruction: str = "Translate the following research report:",
 ) -> str:
-    """Call the LLM to translate the report."""
+    """Call the provider's LLM with a system prompt and one text (report translation, query translation)."""
     import os
 
     if provider == "google":
@@ -1577,7 +1605,7 @@ async def _call_llm_for_translation(
         client = genai.Client(api_key=api_key)
         response = await client.aio.models.generate_content(
             model=model,
-            contents=f"{system_prompt}\n\nTranslate the following research report:\n\n{report}",
+            contents=f"{system_prompt}\n\n{user_instruction}\n\n{report}",
         )
         # response.text may raise ValueError on blocked content
         try:
@@ -1596,7 +1624,7 @@ async def _call_llm_for_translation(
             model=model,
             max_tokens=8192,
             system=system_prompt,
-            messages=[{"role": "user", "content": f"Translate the following research report:\n\n{report}"}],
+            messages=[{"role": "user", "content": f"{user_instruction}\n\n{report}"}],
         )
         return response.content[0].text if response.content else ""
 
@@ -1608,7 +1636,7 @@ async def _call_llm_for_translation(
             model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Translate the following research report:\n\n{report}"},
+                {"role": "user", "content": f"{user_instruction}\n\n{report}"},
             ],
             reasoning_effort=deepseek_reasoning_effort(),
             extra_body=deepseek_thinking_body(),
@@ -1623,7 +1651,7 @@ async def _call_llm_for_translation(
             model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Translate the following research report:\n\n{report}"},
+                {"role": "user", "content": f"{user_instruction}\n\n{report}"},
             ],
         )
         return oai_resp.choices[0].message.content or ""
@@ -1638,7 +1666,7 @@ async def _call_llm_for_translation(
         model=model,
         messages=[
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Translate the following research report:\n\n{report}"},
+            {"role": "user", "content": f"{user_instruction}\n\n{report}"},
         ],
     )
     return local_resp.choices[0].message.content or ""
@@ -2581,6 +2609,9 @@ Do NOT repeat searches. One call per database, then move forward.
 - Verify the spelling of uncommon medical terms (drug names, eponymous syndromes) before searching; prefer the standard term over an abbreviation on the first search.
 - Search broadly: request up to 20-25 results per source for primary databases (the tools cap at 25). You review a pre-ranked tier from `get_studies` and can page the full pool with `browse_studies`, so cast a wide net first.
 - Only call `search_preprints` when peer-reviewed evidence is sparse or the topic is very recent, and always label preprint findings as not peer reviewed.
+- Write each search query as a short combination of 3-8 concept terms or MeSH terms (e.g. `home blood pressure monitoring primary care randomized`). Do NOT paste full article titles, author lists, journal names or years into a query: PubMed requires every word to match, so such queries usually return nothing.
+- To look for one specific study you already know, search 4-6 distinctive words of its title once; if it returns nothing, move on instead of retrying variants of the same title.
+- Page the pool sparingly: at most 3 `browse_studies` calls in total before `screen_studies`. Every call adds to your context window.
 
 ## Report Quality Requirements (CRITICAL)
 
@@ -2606,10 +2637,20 @@ Do NOT repeat searches. One call per database, then move forward.
 
 ## Query
 
-- **Query**: {request.query}
+- **Query**: {request.query}{_original_query_note(request)}
 - **Type**: {request.query_type}
-- **Language**: {request.language}{offline_note}
+- **Language**: {language_display_name(request.language)}{offline_note}
 """
+
+
+def _original_query_note(request: RunRequest) -> str:
+    if not request.original_query:
+        return ""
+    return (
+        f"\n- **Original question (as written by the user)**: {request.original_query}"
+        "\n- Build all database search queries in English (as in **Query** above); "
+        "write the report itself in the report language below."
+    )
 
 
 def _clinical_prompt(request: RunRequest) -> str:
@@ -2697,7 +2738,7 @@ Clear clinical takeaways. What the evidence supports, what remains uncertain.
 Vancouver format with PMIDs/DOIs: [n] Authors. Title. Journal. Year;Vol(Issue):Pages. DOI/PMID.
 Number references sequentially from [1] with no gaps, and do not cite numbers that are absent here.
 
-Write in {request.language} language. If you write the prose in a non-English language, keep numbered \
+{report_language_instruction(request.language)} If you write the prose in a non-English language, keep numbered \
 citations [n], PMID, DOI, journal names, and reference formatting intact."""
 
 
@@ -2772,7 +2813,7 @@ Clear takeaways and future directions.
 Vancouver format with DOIs: [n] Authors. Title. Journal. Year;Vol(Issue):Pages. DOI.
 Number references sequentially from [1] with no gaps, and do not cite numbers that are absent here.
 
-Write in {request.language} language. If you write the prose in a non-English language, keep numbered \
+{report_language_instruction(request.language)} If you write the prose in a non-English language, keep numbered \
 citations [n], DOI, journal names, and reference formatting intact."""
 
 
@@ -2802,6 +2843,7 @@ def recover_report_from_bridge(request: RunRequest, bridge: AgenticEventBridge, 
         verification=verification,
         provider=request.provider,
         runtime_name=f"{runtime_name} (fallback)",
+        language=request.language,
     )
 
 

@@ -45,6 +45,11 @@ class AlwaysAvailableLocalRuntime(LangChainLocalRuntime):
 
 invocations: list[dict[str, object]] = []
 chat_models: list[object] = []
+agent_kwargs: list[dict[str, object]] = []
+
+
+async def fake_context_tokens(_base_url: str, _api_key: str) -> int:
+    return 65536
 
 
 @contextmanager
@@ -76,8 +81,9 @@ def fake_langgraph_agent(agent_impl: Callable[[list[object], dict[str, object]],
         def __init__(self, content: object = None, **_kwargs: object) -> None:
             self.content = content
 
-    def create_react_agent(_llm: object, tools: list[object], prompt: object) -> FakeAgent:
+    def create_react_agent(_llm: object, tools: list[object], prompt: object, **kwargs: object) -> FakeAgent:
         assert prompt
+        agent_kwargs.append(kwargs)
         return FakeAgent(tools)
 
     core_tools_module.tool = fake_lc_tool
@@ -239,6 +245,7 @@ class LocalRuntimeTests(unittest.IsolatedAsyncioTestCase):
             patch("medical_deep_research.runtime.verify_studies", fake_verify_studies),
             patch("medical_deep_research.agentic_tools.search_source", fake_search_source),
             patch("medical_deep_research.agentic_tools.verify_studies", fake_verify_studies),
+            patch("medical_deep_research.runtime._local_server_context_tokens", fake_context_tokens),
         ):
             events = [event async for event in AlwaysAvailableLocalRuntime().stream_run(make_request())]
         _assert_progress_monotonic(events)
@@ -355,6 +362,7 @@ class LocalRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.collect_events(agent)
 
         self.assertEqual(invocations[-1]["config"], {"recursion_limit": LangChainLocalRuntime.recursion_limit})
+        self.assertIn("pre_model_hook", agent_kwargs[-1])
         self.assertEqual(chat_models[-1].kwargs["timeout"], LangChainLocalRuntime.request_timeout_seconds)  # type: ignore[attr-defined]
         self.assertEqual(chat_models[-1].kwargs["max_retries"], LangChainLocalRuntime.max_retries)  # type: ignore[attr-defined]
 
@@ -376,6 +384,38 @@ class LocalRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final.extra["report_source"], "submitted_report")
         self.assertNotIn("<think>", final.report_markdown or "")
         self.assertNotIn("Plan the sections first", final.report_markdown or "")
+
+
+class ContextTrimTests(unittest.TestCase):
+    def _history(self, tool_outputs: int, size: int) -> list[object]:
+        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+        messages: list[object] = [HumanMessage(content="question")]
+        for i in range(tool_outputs):
+            call_id = f"call_{i}"
+            messages.append(AIMessage(content="", tool_calls=[{"id": call_id, "name": "browse_studies", "args": {"page": i}}]))
+            messages.append(ToolMessage(content="x" * size, tool_call_id=call_id, name="browse_studies"))
+        return messages
+
+    def test_history_under_budget_is_unchanged(self) -> None:
+        from medical_deep_research.runtime import trim_tool_outputs_for_context
+
+        messages = self._history(3, 300)
+        self.assertIs(trim_tool_outputs_for_context(messages, budget_tokens=100_000), messages)
+
+    def test_old_tool_outputs_are_stubbed_and_pairing_is_kept(self) -> None:
+        from medical_deep_research.runtime import _estimate_tokens, trim_tool_outputs_for_context
+
+        messages = self._history(20, 9000)
+        trimmed = trim_tool_outputs_for_context(messages, budget_tokens=25_000, keep_recent=6)
+
+        self.assertEqual(len(trimmed), len(messages))
+        self.assertLessEqual(_estimate_tokens(trimmed), 25_000)
+        tools = [m for m in trimmed if getattr(m, "type", None) == "tool"]
+        self.assertIn("omitted to fit the context window", tools[0].content)
+        self.assertTrue(all(len(m.content) == 9000 for m in tools[-6:]))
+        self.assertEqual([m.tool_call_id for m in tools], [f"call_{i}" for i in range(20)])
+        self.assertEqual(len(messages[2].content), 9000)  # the original list is not modified
 
 
 class ReasoningAndTranslationHelperTests(unittest.TestCase):

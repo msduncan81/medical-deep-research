@@ -139,7 +139,7 @@ class CodexRuntimeProgressTests(unittest.IsolatedAsyncioTestCase):
 
         instructions = _codex_agentic_instructions(make_request(language="ko"), "OpenAI Codex SDK")
         self.assertIn("submit_report.report_markdown", instructions)
-        self.assertIn("must be written in ko", instructions)
+        self.assertIn("must be written in Korean", instructions)
 
     async def test_codex_stream_emits_tool_progress_while_native_task_runs(self) -> None:
         with (

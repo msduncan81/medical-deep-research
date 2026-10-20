@@ -13,7 +13,10 @@ from dataclasses import dataclass, field
 from contextlib import contextmanager, suppress
 from json import JSONDecodeError
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, AsyncIterator, Iterator, TypeVar
+
+import httpx
 
 from pydantic import BaseModel
 from sqlmodel import Field
@@ -41,6 +44,7 @@ from .research import (
     source_catalog,
     verify_studies,
 )
+from .languages import is_english, language_display_name, looks_like_language, looks_like_portuguese
 from .progress import ProgressTracker
 from .research.models import QueryPlan, ScoredStudy, SearchProviderResult, VerificationSummary
 from .agentic_tools import (
@@ -67,6 +71,7 @@ from .agentic_tools import (
     tool_submit_report,
     tool_synthesize_report,
     tool_translate_report,
+    _call_llm_for_translation,
     tool_update_progress,
     tool_verify_studies,
     tool_write_todos,
@@ -97,6 +102,13 @@ LOCAL_RECURSION_LIMIT = 150
 # Local models get this many submit_report rejections (i.e. rewrites) before
 # the run stops and recovers the report from the shared research state.
 LOCAL_REPORT_REJECTIONS_BEFORE_RECOVERY = 2
+# Context-window management for local models: old tool outputs are replaced by a short
+# stub before each model call once the conversation nears the server's context window.
+LOCAL_CONTEXT_TOKENS_FALLBACK = 32768
+LOCAL_ANSWER_RESERVE_TOKENS = 12000
+LOCAL_TOOL_SCHEMA_RESERVE_TOKENS = 4000
+LOCAL_KEEP_RECENT_TOOL_OUTPUTS = 6
+_CHARS_PER_TOKEN = 3.0
 CODEX_AGENTIC_TIMEOUT_SECONDS = 1800.0
 CODEX_AGENTIC_HEARTBEAT_SECONDS = 15.0
 CODEX_AGENTIC_MAX_TOOL_TURNS = 50
@@ -128,6 +140,85 @@ def _env_int(name: str, default: int) -> int:
     except ValueError:
         return default
     return value if value > 0 else default
+
+
+def _message_chars(message: Any) -> int:
+    size = len(str(getattr(message, "content", "") or ""))
+    tool_calls = getattr(message, "tool_calls", None)
+    if tool_calls:
+        size += len(json.dumps(tool_calls, default=str))
+    return size
+
+
+def _estimate_tokens(messages: list[Any]) -> int:
+    return int(sum(_message_chars(m) for m in messages) / _CHARS_PER_TOKEN)
+
+
+def trim_tool_outputs_for_context(
+    messages: list[Any],
+    budget_tokens: int,
+    keep_recent: int = LOCAL_KEEP_RECENT_TOOL_OUTPUTS,
+) -> list[Any]:
+    """Replace the content of old tool messages with a stub until the history fits ``budget_tokens``.
+
+    Message order and tool-call/tool-result pairing are preserved; only tool outputs are
+    shortened, oldest first, and the most recent ``keep_recent`` outputs are left intact.
+    The full data stays in the shared research state, so the agent can re-query it.
+    """
+    total = _estimate_tokens(messages)
+    if total <= budget_tokens:
+        return messages
+    tool_positions = [i for i, m in enumerate(messages) if getattr(m, "type", None) == "tool"]
+    candidates = tool_positions[:-keep_recent] if keep_recent > 0 else tool_positions
+    trimmed = list(messages)
+    for index in candidates:
+        if total <= budget_tokens:
+            break
+        message = trimmed[index]
+        old_chars = len(str(message.content or ""))
+        name = getattr(message, "name", None) or "tool"
+        stub = (
+            f"[Earlier output of {name} omitted to fit the context window. The data is kept in "
+            "shared research state; call the tool again (e.g. browse_studies) if you need it.]"
+        )
+        if old_chars <= len(stub) + 200:
+            continue
+        trimmed[index] = message.model_copy(update={"content": stub})
+        total -= int((old_chars - len(stub)) / _CHARS_PER_TOKEN)
+    return trimmed
+
+
+def _context_trim_hook(budget_tokens: int) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    def hook(state: dict[str, Any]) -> dict[str, Any]:
+        messages = list(state.get("messages") or [])
+        return {"llm_input_messages": trim_tool_outputs_for_context(messages, budget_tokens)}
+
+    return hook
+
+
+async def _local_server_context_tokens(base_url: str, api_key: str) -> int | None:
+    """Context window reported by an OpenAI-compatible server's /models (Strata, llama-server, LM Studio)."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(
+                f"{base_url.rstrip('/')}/models", headers={"Authorization": f"Bearer {api_key}"}
+            )
+            response.raise_for_status()
+            data = response.json().get("data") or []
+    except Exception:  # noqa: BLE001 - optional probe
+        return None
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        meta = entry.get("meta") if isinstance(entry.get("meta"), dict) else {}
+        for value in (meta.get("n_ctx"), entry.get("context_length"), entry.get("max_context_length"),
+                      entry.get("max_model_len"), meta.get("n_ctx_train")):
+            try:
+                if value and int(value) > 0:
+                    return int(value)
+            except (TypeError, ValueError):
+                continue
+    return None
 
 
 def _local_report_rejections_before_recovery() -> int:
@@ -391,6 +482,72 @@ def _has_native_credentials(
     return bool(_provider_api_env(provider, api_keys))
 
 
+QUERY_TRANSLATION_TIMEOUT_SECONDS = 180.0
+
+_QUERY_TRANSLATION_PROMPT = """\
+You translate clinical research questions from Portuguese into English so they can be used to search
+biomedical databases (PubMed, Europe PMC, OpenAlex, Cochrane).
+- Translate faithfully; do not add, drop or interpret concepts.
+- Use the standard English medical term (MeSH-style) for each concept, e.g. "atenção primária à saúde" ->
+  "primary health care", "agentes comunitários de saúde" -> "community health workers".
+- Keep any labels and line structure exactly as given (e.g. "population: ..." stays "population: ...").
+- Output only the translation, with no comments."""
+
+
+async def prepare_request_for_search(request: RunRequest) -> RunRequest:
+    """Translate a Portuguese question (and PICO/PCC fields) to English for database searching.
+
+    The original wording is kept in ``original_query``/``original_query_payload`` so prompts and
+    regional sources can still use it. Any failure leaves the request unchanged.
+    """
+    text = " ".join([request.query, *request.query_payload.values()])
+    if request.original_query or not looks_like_portuguese(text):
+        return request
+    if request.offline_mode or request.provider == "codex":
+        return request
+    if not _has_native_credentials(request.provider, request.api_keys, codex_home_path=request.codex_home_path):
+        return request
+
+    async def translate(value: str) -> str:
+        translated = await _call_llm_for_translation(
+            request.provider,
+            request.model,
+            request.api_keys,
+            _QUERY_TRANSLATION_PROMPT,
+            value,
+            user_instruction="Translate:",
+        )
+        return strip_reasoning_blocks(translated or "")
+
+    try:
+        english_query = await asyncio.wait_for(translate(request.query), QUERY_TRANSLATION_TIMEOUT_SECONDS)
+        english_payload: dict[str, str] = {}
+        if request.query_payload:
+            keys = list(request.query_payload)
+            block = "\n".join(f"{key}: {request.query_payload[key]}" for key in keys)
+            translated_block = await asyncio.wait_for(translate(block), QUERY_TRANSLATION_TIMEOUT_SECONDS)
+            for line in translated_block.splitlines():
+                key, sep, value = line.partition(":")
+                key = key.strip().lstrip("-* ").strip()
+                if sep and key in request.query_payload and value.strip():
+                    english_payload[key] = value.strip()
+            if set(english_payload) != set(keys):
+                english_payload = {}
+    except Exception as exc:  # pragma: no cover - network/model failure path
+        _log.warning("Query translation failed; searching with the original wording: %s", exc)
+        return request
+    if not english_query.strip() or looks_like_portuguese(english_query):
+        return request
+    return request.model_copy(
+        update={
+            "query": english_query.strip(),
+            "query_payload": english_payload or dict(request.query_payload),
+            "original_query": request.query,
+            "original_query_payload": dict(request.query_payload),
+        }
+    )
+
+
 def _legacy_claude_sdk_dependency_reason() -> str | None:
     if os.name == "nt":
         configured = os.getenv("CLAUDE_CODE_GIT_BASH_PATH")
@@ -539,7 +696,7 @@ def _native_agent_instructions(request: RunRequest, runtime_name: str) -> str:
             "The search tool reports focused/broadened search rounds and only broadens after sparse retrieval.",
             "When asked to synthesize, call `verify_results` and `synthesize_report`, then write the final markdown report yourself from the structured synthesis packet.",
             "The final report must follow the report-format instructions from `synthesize_report`; do not output the deterministic template, runtime metadata bullets, or a database hit table.",
-            f"The requested report language is: {request.language}.",
+            f"The requested report language is: {language_display_name(request.language)}.",
             "Return only valid JSON matching the structured schema. Do not wrap the JSON in markdown fences or prose.",
         ]
     )
@@ -610,7 +767,7 @@ def _native_user_prompt(request: RunRequest) -> str:
             f"Query type: {request.query_type}",
             f"Provider: {request.provider}",
             f"Preferred model: {request.model}",
-            f"Report language: {request.language}",
+            f"Report language: {language_display_name(request.language)}",
             f"Offline mode: {'enabled' if request.offline_mode else 'disabled'}",
             "Build the literature review through MCP tools and return the structured output.",
         ]
@@ -1066,6 +1223,7 @@ class DeterministicRuntime(ResearchRuntime):
             verification=verification,
             provider=request.provider,
             runtime_name=self.runtime_name,
+            language=request.language,
         )
         translation_bridge = AgenticEventBridge()
         translation_bridge.progress = tracker
@@ -2035,6 +2193,7 @@ class NativeSDKRuntime(DeterministicRuntime):
             verification=final_verification,
             provider=request.provider,
             runtime_name=self.runtime_name,
+            language=request.language,
         )
         yield _ev(
             tracker,
@@ -2173,13 +2332,18 @@ async def _maybe_translate_report(
     report: str,
 ) -> tuple[str, list[RuntimeEventPayload]]:
     """Translate the report if language is not English. Returns (report, events)."""
-    if request.language in ("en", "english", "") or not report.strip():
+    if is_english(request.language) or not report.strip():
         return report, []
     if request.offline_mode:
         bridge._intermediate["translation_status"] = "skipped"
         bridge._intermediate["translation_error"] = "Offline mode is enabled."
         return report, []
     if request.provider == "codex":
+        return report, []
+    if looks_like_language(report, request.language):
+        # The agent already wrote in the target language; translating again
+        # would only risk truncation and terminology drift.
+        bridge._intermediate["translation_status"] = "not_needed"
         return report, []
     if request.provider != "local" and not _has_native_credentials(
         request.provider,
@@ -3313,7 +3477,7 @@ def _codex_agentic_instructions(request: RunRequest, runtime_name: str) -> str:
         f"You have at most {CODEX_AGENTIC_MAX_TOOL_TURNS} local tool-decision turns. "
         "Do not spend extra turns on optional browsing once the evidence base is sufficient; "
         "move to ranking, appraisal, synthesis, and submit_report.\n"
-        f"`submit_report.report_markdown` must be written in {request.language}. "
+        f"`submit_report.report_markdown` must be written in {language_display_name(request.language)}. "
         "When writing non-English prose, preserve citation numbers, PMID/DOI values, "
         "journal names, and reference formatting.\n"
         "After `fetch_fulltext`, if the result asks for user PDFs, wait for that tool to return; "
@@ -3350,7 +3514,7 @@ def _codex_decision_prompt(request: RunRequest, bridge: AgenticEventBridge, obse
     return (
         f"Research question:\n{request.query}\n\n"
         f"Query type: {request.query_type}\n"
-        f"Target language: {request.language}\n\n"
+        f"Target language: {language_display_name(request.language)}\n\n"
         f"Current app state:\n{json.dumps(_codex_state_summary(bridge), ensure_ascii=False, default=str)}\n\n"
         f"Recent tool observations:\n{recent_observations}\n\n"
         f"Turn {turn_index} of {CODEX_AGENTIC_MAX_TOOL_TURNS} "
@@ -5387,6 +5551,17 @@ class LangChainLocalRuntime(NativeSDKRuntime):
         for event in _agentic_final_events(self, request, final_report, bridge, report_source=report_source):
             yield event
 
+    async def _history_token_budget(self, request: RunRequest, system_prompt: str) -> int | None:
+        """Token budget for the message history, from the local server's context window."""
+        if self.provider != "local":
+            return None
+        context_tokens = _env_int("MDR_LOCAL_CONTEXT_TOKENS", 0) or await _local_server_context_tokens(
+            local_base_url(request.api_keys),
+            request.api_keys.get("local") or os.environ.get("MDR_LOCAL_API_KEY") or "local",
+        ) or LOCAL_CONTEXT_TOKENS_FALLBACK
+        bridge_reserve = int(len(system_prompt) / _CHARS_PER_TOKEN) + LOCAL_TOOL_SCHEMA_RESERVE_TOKENS
+        return max(4000, context_tokens - bridge_reserve - LOCAL_ANSWER_RESERVE_TOKENS)
+
     def _agentic_fallback_reason(self, bridge: AgenticEventBridge) -> str | None:
         """Reason to discard the agentic run and use the deterministic pipeline.
 
@@ -5422,10 +5597,16 @@ class LangChainLocalRuntime(NativeSDKRuntime):
             from langgraph.prebuilt import create_react_agent
 
             llm = self._resolve_chat_model(request)
+            system_prompt = agentic_system_prompt(request, self.runtime_name)
+            agent_kwargs: dict[str, Any] = {}
+            budget = await self._history_token_budget(request, system_prompt)
+            if budget is not None:
+                agent_kwargs["pre_model_hook"] = _context_trim_hook(budget)
             agent = create_react_agent(
                 llm,
                 tools,
-                prompt=SystemMessage(content=agentic_system_prompt(request, self.runtime_name)),
+                prompt=SystemMessage(content=system_prompt),
+                **agent_kwargs,
             )
 
             final_text: str | None = None

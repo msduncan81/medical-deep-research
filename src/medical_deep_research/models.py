@@ -179,6 +179,9 @@ class RunRequest(SQLModel):
     model: str
     language: str = Field(default="en")
     query_payload: dict[str, str] = Field(default_factory=dict)
+    # The question as the user wrote it, when `query` was translated to English for searching.
+    original_query: str | None = None
+    original_query_payload: dict[str, str] = Field(default_factory=dict)
     api_keys: dict[str, str] = Field(default_factory=dict)
     offline_mode: bool = False
     recent_years_lookback: int = Field(default=5)

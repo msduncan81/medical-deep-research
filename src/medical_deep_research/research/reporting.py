@@ -95,7 +95,72 @@ def render_reference_list(studies: list[ScoredStudy]) -> str:
     return "## 7. References\n\n" + body if body else "## 7. References\n"
 
 
-def _render_methods(plan: QueryPlan, results: list[SearchProviderResult]) -> list[str]:
+_REPORT_TEXT: dict[str, dict[str, str]] = {
+    "en": {
+        "title": "# Research Report",
+        "summary": "## 1. Executive Summary",
+        "summary_found": "The evidence workflow identified {count} ranked studies relevant to the question. The leading evidence includes {first}{second}.",
+        "summary_and": " and ",
+        "summary_none": "The evidence workflow completed, but no retrievable studies were ranked. The search should be revised before drawing conclusions.",
+        "background": "## 2. Background",
+        "question": "Research question: {query}",
+        "methods": "## 3. Methods",
+        "methods_query": "The query was handled as a {query_type} question in the {domain} domain. The search used the main concepts: {keywords}.",
+        "methods_hits": "Searches returned {hits} source records before deduplication and ranking. Executed sources: {sources}.",
+        "methods_skipped": "Sources not executed or skipped: {sources}.",
+        "methods_failed": "Sources with errors: {sources}.",
+        "none": "none",
+        "results": "## 4. Results/Findings",
+        "study_line": "- [{ref}] {title}. Source: {sources}. Evidence: {level}. Score: {score}. Citations: {citations}.",
+        "unknown": "Unknown",
+        "abstract": "  Abstract summary: {snippet}",
+        "no_studies": "- No ranked studies available.",
+        "discussion": "## 5. Discussion",
+        "discussion_text": "The ranked evidence should be interpreted with attention to indirectness, study design, and the amount of full text available for appraisal. Automated ranking is not a substitute for duplicate human screening or a formal risk-of-bias review.",
+        "verification": "Identifier verification checked the highest-ranked PMID-bearing records: {verified} PMIDs verified, {missing} records without PMIDs in the checked set, and {missing_pubmed} records missing from PubMed.",
+        "conclusions": "## 6. Conclusions",
+        "conclusions_text": "The available evidence should be treated as a mapped evidence base for review and follow-up screening. Conclusions should be strengthened only after full-text review of the key studies and explicit certainty appraisal.",
+        "references": "## 7. References",
+        "notes": "Notes:",
+    },
+    "pt": {
+        "title": "# Relatório de Pesquisa",
+        "summary": "## 1. Resumo",
+        "summary_found": "O fluxo de busca de evidências identificou {count} estudos ranqueados relevantes para a pergunta. As principais evidências incluem {first}{second}.",
+        "summary_and": " e ",
+        "summary_none": "O fluxo de busca foi concluído, mas nenhum estudo recuperável foi ranqueado. A busca deve ser revista antes de qualquer conclusão.",
+        "background": "## 2. Contexto",
+        "question": "Pergunta de pesquisa: {query}",
+        "methods": "## 3. Métodos",
+        "methods_query": "A pergunta foi tratada como {query_type} no domínio {domain}. A busca usou os conceitos principais: {keywords}.",
+        "methods_hits": "As buscas retornaram {hits} registros antes da remoção de duplicatas e do ranqueamento. Fontes consultadas: {sources}.",
+        "methods_skipped": "Fontes não consultadas ou puladas: {sources}.",
+        "methods_failed": "Fontes com erro: {sources}.",
+        "none": "nenhum",
+        "results": "## 4. Resultados",
+        "study_line": "- [{ref}] {title}. Fonte: {sources}. Evidência: {level}. Pontuação: {score}. Citações: {citations}.",
+        "unknown": "Não classificado",
+        "abstract": "  Resumo do artigo: {snippet}",
+        "no_studies": "- Nenhum estudo ranqueado disponível.",
+        "discussion": "## 5. Discussão",
+        "discussion_text": "As evidências ranqueadas devem ser interpretadas considerando a evidência indireta, o desenho dos estudos e quanto do texto completo esteve disponível para avaliação. O ranqueamento automático não substitui a triagem em duplicidade por pessoas nem uma avaliação formal do risco de viés.",
+        "verification": "A conferência de identificadores verificou os registros mais bem ranqueados: {verified} PMIDs confirmados, {missing} registros sem PMID no conjunto conferido e {missing_pubmed} registros não encontrados no PubMed.",
+        "conclusions": "## 6. Conclusões",
+        "conclusions_text": "As evidências disponíveis devem ser tratadas como um mapa da literatura para revisão e nova triagem. As conclusões só devem ser reforçadas após leitura do texto completo dos estudos principais e avaliação explícita da certeza da evidência.",
+        "references": "## 7. Referências",
+        "notes": "Observações:",
+    },
+}
+
+
+def _report_text(language: str | None) -> dict[str, str]:
+    return _REPORT_TEXT.get((language or "en").lower(), _REPORT_TEXT["en"])
+
+
+def _render_methods(
+    plan: QueryPlan, results: list[SearchProviderResult], language: str | None = "en"
+) -> list[str]:
+    text = _report_text(language)
     searched = []
     skipped = []
     failed = []
@@ -114,18 +179,20 @@ def _render_methods(plan: QueryPlan, results: list[SearchProviderResult]) -> lis
         total_hits += len(matched.studies)
         searched.append(f"{source} ({len(matched.studies)})")
     lines = [
-        "## 3. Methods",
+        text["methods"],
         "",
-        f"The query was handled as a {plan.query_type.upper()} question in the {plan.domain} domain. "
-        f"The search used the main concepts: {', '.join(plan.keywords[:10]) or 'none'}.",
+        text["methods_query"].format(
+            query_type=plan.query_type.upper(),
+            domain=plan.domain,
+            keywords=", ".join(plan.keywords[:10]) or text["none"],
+        ),
         "",
-        f"Searches returned {total_hits} source records before deduplication and ranking. "
-        f"Executed sources: {', '.join(searched) or 'none'}.",
+        text["methods_hits"].format(hits=total_hits, sources=", ".join(searched) or text["none"]),
     ]
     if skipped:
-        lines.append(f"Sources not executed or skipped: {', '.join(skipped)}.")
+        lines.append(text["methods_skipped"].format(sources=", ".join(skipped)))
     if failed:
-        lines.append(f"Sources with errors: {', '.join(failed)}.")
+        lines.append(text["methods_failed"].format(sources=", ".join(failed)))
     return lines
 
 
@@ -138,77 +205,76 @@ def render_report(
     verification: VerificationSummary,
     provider: str,
     runtime_name: str,
+    language: str | None = "en",
 ) -> str:
+    text = _report_text(language)
     top_studies = ranked_studies[:MAX_REPORT_STUDIES]
     lines = [
-        "# Research Report",
+        text["title"],
         "",
-        "## 1. Executive Summary",
+        text["summary"],
         "",
     ]
     del runtime_name, provider
 
     if top_studies:
         lines.append(
-            f"The evidence workflow identified {len(ranked_studies)} ranked studies relevant to the question. "
-            f"The leading evidence includes {top_studies[0].title}"
-            f"{' and ' + top_studies[1].title if len(top_studies) > 1 else ''}."
+            text["summary_found"].format(
+                count=len(ranked_studies),
+                first=top_studies[0].title,
+                second=(text["summary_and"] + top_studies[1].title) if len(top_studies) > 1 else "",
+            )
         )
     else:
-        lines.append(
-            "The evidence workflow completed, but no retrievable studies were ranked. The search should be revised before drawing conclusions."
-        )
+        lines.append(text["summary_none"])
 
-    lines.extend(["", "## 2. Background", "", f"Research question: {query}"])
-    lines.extend(_render_methods(plan, search_results))
-    lines.extend(["", "## 4. Results/Findings", ""])
+    lines.extend(["", text["background"], "", text["question"].format(query=query)])
+    lines.extend(_render_methods(plan, search_results, language))
+    lines.extend(["", text["results"], ""])
 
     if top_studies:
         for study in top_studies:
             lines.append(
-                f"- [{study.reference_number}] {study.title}. "
-                f"Source: {', '.join(study.sources or [study.source])}. "
-                f"Evidence: {study.evidence_level or 'Unknown'}. "
-                f"Score: {study.composite_score}. "
-                f"Citations: {study.citation_count}."
+                text["study_line"].format(
+                    ref=study.reference_number,
+                    title=study.title,
+                    sources=", ".join(study.sources or [study.source]),
+                    level=study.evidence_level or text["unknown"],
+                    score=study.composite_score,
+                    citations=study.citation_count,
+                )
             )
             if study.abstract:
                 snippet = study.abstract.replace("\n", " ").strip()
-                lines.append(f"  Abstract summary: {snippet[:280]}{'...' if len(snippet) > 280 else ''}")
+                lines.append(text["abstract"].format(snippet=f"{snippet[:280]}{'...' if len(snippet) > 280 else ''}"))
     else:
-        lines.append("- No ranked studies available.")
+        lines.append(text["no_studies"])
 
     lines.extend(
         [
             "",
-            "## 5. Discussion",
+            text["discussion"],
             "",
-            "The ranked evidence should be interpreted with attention to indirectness, study design, and the amount of full text available for appraisal. "
-            "Automated ranking is not a substitute for duplicate human screening or a formal risk-of-bias review.",
+            text["discussion_text"],
             "",
-            f"Identifier verification checked the highest-ranked PMID-bearing records: {verification.verified_pmids} PMIDs verified, "
-            f"{verification.missing_pmids} records without PMIDs in the checked set, and {verification.missing_from_pubmed} records missing from PubMed.",
+            text["verification"].format(
+                verified=verification.verified_pmids,
+                missing=verification.missing_pmids,
+                missing_pubmed=verification.missing_from_pubmed,
+            ),
         ]
     )
     if verification.notes:
         lines.extend(f"- {note}" for note in verification.notes)
 
-    lines.extend(
-        [
-            "",
-            "## 6. Conclusions",
-            "",
-            "The available evidence should be treated as a mapped evidence base for review and follow-up screening. "
-            "Conclusions should be strengthened only after full-text review of the key studies and explicit certainty appraisal.",
-        ]
-    )
+    lines.extend(["", text["conclusions"], "", text["conclusions_text"]])
 
-    lines.extend(["", "## 7. References", ""])
+    lines.extend(["", text["references"], ""])
     if top_studies:
         lines.append(render_reference_entries(top_studies))
 
     if plan.notes:
-        lines.extend(["", "Notes:"])
+        lines.extend(["", text["notes"]])
         lines.extend(f"- {note}" for note in plan.notes)
 
     return "\n".join(lines)

@@ -25,7 +25,7 @@ from .models import (
 from .persistence import AppDatabase
 from .model_catalog import DEFAULT_MODELS, provider_model_options
 from .provider_config import normalize_model_id
-from .runtime import RunRequest, build_runtime, describe_provider_runtime
+from .runtime import RunRequest, build_runtime, describe_provider_runtime, prepare_request_for_search
 
 
 _UICallback = Callable[[str, str], None]  # (run_id, change_type)
@@ -434,6 +434,7 @@ class ResearchService:
 
         sequence = 0
         try:
+            request = await prepare_request_for_search(request)
             async for event in runtime.stream_run(request):
                 sequence += 1
                 self._persist_event(run_id, sequence, event)
