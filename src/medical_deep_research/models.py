@@ -61,6 +61,9 @@ class ArtifactType(StrEnum):
     FINAL_REPORT = "final_report"
     DEBUG_TRACE = "debug_trace"
     FULLTEXT_UPLOAD = "fulltext_upload"
+    GRADE_OUTCOMES = "grade_outcomes"
+    GRADE_REVIEW_MAP = "grade_review_map"
+    GRADE_EXTRACTION = "grade_extraction"
 
 
 class ApprovalStatus(StrEnum):

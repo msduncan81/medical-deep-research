@@ -2232,6 +2232,7 @@ async def tool_fetch_fulltext(
                 return
             bridge._pdf_bytes[rank] = pdf_bytes
             bridge._pdf_sources[rank] = source
+            bridge._intermediate.setdefault("fulltext_by_rank", {})[rank] = text
             _store_fulltext_for_rank(
                 request,
                 rank,
@@ -2520,6 +2521,7 @@ async def tool_parse_pdf(
 
     text, parse_error = await _extract_pdf_text_from_bytes(rank, pdf_bytes, source)
     if text:
+        bridge._intermediate.setdefault("fulltext_by_rank", {})[rank] = text
         _store_fulltext_for_rank(
             request,
             rank,

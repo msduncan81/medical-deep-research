@@ -51,6 +51,7 @@ from .progress import ProgressTracker
 from .research.models import QueryPlan, ScoredStudy, SearchProviderResult, VerificationSummary
 from .agentic_tools import (
     AgenticEventBridge,
+    _stored_fulltext_for_rank,
     MAX_REPORT_STUDIES,
     STUDY_PAGE_SIZE,
     TOOL_DESCRIPTIONS,
@@ -261,6 +262,10 @@ async def _local_server_context_tokens(base_url: str, api_key: str) -> int | Non
             except (TypeError, ValueError):
                 continue
     return None
+
+
+def grade_pipeline_enabled() -> bool:
+    return os.getenv("MDR_GRADE_PIPELINE", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _local_report_rejections_before_recovery() -> int:
@@ -5593,8 +5598,71 @@ class LangChainLocalRuntime(NativeSDKRuntime):
         for evt in translate_events:
             yield evt
 
+        if grade_pipeline_enabled() and bridge.ranked_studies:
+            async for evt in self._grade_stage1_events(request, bridge):
+                yield evt
+
         for event in _agentic_final_events(self, request, final_report, bridge, report_source=report_source):
             yield event
+
+    async def _grade_stage1_events(
+        self, request: RunRequest, bridge: AgenticEventBridge
+    ) -> AsyncIterator[RuntimeEventPayload]:
+        """Run the GRADE graph (stage 1) on the ranked studies and emit its artifacts."""
+        from .grade.graph import run_stage1
+        from .research.snowball import snowball
+
+        progress_queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+        async def progress(node: str, message: str) -> None:
+            await progress_queue.put(f"GRADE · {node}: {message}")
+
+        async def structured_call(task: str, instructions: str, prompt: str, model: type[TModel]) -> TModel:
+            return await self._run_structured_checkpoint(
+                request, task_name=task, instructions=instructions, prompt=prompt, output_model=model
+            )
+
+        async def fetch_references(study: Any) -> Any:
+            return await snowball(study, "references", max_results=100)
+
+        cache = bridge._intermediate.get("fulltext_by_rank", {})
+
+        def fulltext_for(study: Any) -> str | None:
+            rank = int(study.reference_number or 0)
+            if rank in cache:
+                return cache[rank]
+            stored = _stored_fulltext_for_rank(request, rank)
+            return stored[0] if stored else None
+
+        async def run() -> Any:
+            try:
+                return await run_stage1(
+                    request, list(bridge.ranked_studies), structured_call, fetch_references, fulltext_for, progress
+                )
+            finally:
+                await progress_queue.put(None)
+
+        task = asyncio.create_task(run())
+        while (message := await progress_queue.get()) is not None:
+            yield _ev(bridge.progress, EventType.AGENT_STARTED, "appraising", message, agent_name="GRADE graph")
+        try:
+            result = await task
+        except Exception as exc:  # noqa: BLE001 - stage 1 is additive; never break the run
+            _log.warning("GRADE stage 1 failed: %s", exc)
+            yield _ev(bridge.progress, EventType.AGENT_STARTED, "appraising",
+                      f"GRADE stage 1 failed: {_format_exception(exc)}", agent_name="GRADE graph")
+            return
+        bridge._intermediate["grade_stage1"] = result.model_dump(mode="json")
+        for artifact_type, name, payload in (
+            (ArtifactType.GRADE_OUTCOMES, "GRADE outcomes",
+             {"outcomes": [o.model_dump(mode="json") for o in result.outcomes],
+              "confirmed_by_user": result.outcomes_confirmed_by_user}),
+            (ArtifactType.GRADE_REVIEW_MAP, "GRADE review map", result.review_map.model_dump(mode="json")),
+            (ArtifactType.GRADE_EXTRACTION, "GRADE extraction",
+             {"extractions": [e.model_dump(mode="json") for e in result.extractions], "notes": result.notes}),
+        ):
+            yield _ev(bridge.progress, EventType.ARTIFACT_CREATED, "appraising", f"Saved {name}",
+                      artifact_type=artifact_type, artifact_name=name, artifact_json=payload)
 
     async def _submit_unsubmitted_report(self, request: RunRequest, bridge: AgenticEventBridge) -> None:
         """Run a report the model wrote as plain text (instead of calling submit_report) through submit_report.
@@ -5711,7 +5779,7 @@ class LangChainLocalRuntime(NativeSDKRuntime):
         finally:
             await bridge.queue.put(None)
 
-    # Legacy structured checkpoint (not used for local, but satisfies ABC)
+    # Structured call used by the GRADE graph nodes (and by legacy checkpoints).
     async def _run_structured_checkpoint(
         self,
         request: RunRequest,
@@ -5721,14 +5789,29 @@ class LangChainLocalRuntime(NativeSDKRuntime):
         prompt: str,
         output_model: type[TModel],
     ) -> TModel:
-        from langchain_core.messages import SystemMessage, HumanMessage
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
         llm = self._resolve_chat_model(request)
-        result = await llm.ainvoke([
-            SystemMessage(content=instructions),
-            HumanMessage(content=prompt),
-        ])
-        return _coerce_model_output(result.content, output_model)
+        system = (
+            f"{instructions}\n\nReturn ONLY one JSON object (no markdown fences, no prose) that validates "
+            f"against this JSON schema:\n{json.dumps(output_model.model_json_schema())}"
+        )
+        messages: list[Any] = [SystemMessage(content=system), HumanMessage(content=prompt)]
+        last_error: Exception | None = None
+        for _attempt in range(2):
+            result = await llm.ainvoke(messages)
+            text = strip_reasoning_blocks(_message_content_text(result) or "")
+            try:
+                return _coerce_model_output(text, output_model)
+            except Exception as exc:  # noqa: BLE001 - one corrective retry
+                last_error = exc
+                messages = [
+                    *messages,
+                    AIMessage(content=text[:4000]),
+                    HumanMessage(content=f"That was not valid JSON for the schema ({type(exc).__name__}: "
+                                         f"{str(exc)[:300]}). Return only the corrected JSON object."),
+                ]
+        raise RuntimeError(f"{task_name}: model did not return valid JSON") from last_error
 
 
 class DeepSeekRuntime(LangChainLocalRuntime):

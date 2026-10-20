@@ -26,6 +26,7 @@ from ...pdf_text import extract_pdf_text
 from ...reading_service import ReadingService
 from ...service import ResearchService
 from ..theme import BORDER_DIM, SURFACE, SURFACE_SOFT, TEXT_MUTED, adjusted_point_size
+from ..widgets.outcome_checkpoint import OutcomeCheckpointPanel
 
 
 class TraceTab(QWidget):
@@ -77,6 +78,11 @@ class TraceTab(QWidget):
         self._pdf_panel.setVisible(False)
         layout.addWidget(self._pdf_panel)
 
+        self._outcome_panel = OutcomeCheckpointPanel(self._t)
+        self._outcome_panel.confirmed.connect(self._on_outcomes_confirmed)
+        self._outcome_panel.skipped.connect(self._on_outcomes_skipped)
+        layout.addWidget(self._outcome_panel)
+
         self._list = QListWidget()
         self._list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
         self._list.setStyleSheet(
@@ -95,6 +101,7 @@ class TraceTab(QWidget):
         self._pdf_approval = self._find_pdf_approval(approvals)
         self._pdf_details = self._approval_details(self._pdf_approval)
         self._rebuild_pdf_panel()
+        self._outcome_panel.set_approvals(approvals)
 
     def set_events(self, events: list) -> None:
         self._count_label.setText(f"{len(events)} {self._t('events')}")
@@ -125,6 +132,21 @@ class TraceTab(QWidget):
         self._title.setText(self._t("execution_trace"))
         self._empty.setText(self._t("waiting_events"))
         self._rebuild_pdf_panel()
+        self._outcome_panel.retranslate()
+
+    def _on_outcomes_confirmed(self, approval_id: str, outcomes: list) -> None:
+        if not self._service or not self._run:
+            return
+        self._service.resolve_outcome_confirmation(approval_id, outcomes)
+        self.statusMessage.emit(self._t("outcome_confirmed_status"))
+        self.checkpointChanged.emit(self._run.id)
+
+    def _on_outcomes_skipped(self, approval_id: str) -> None:
+        if not self._service or not self._run:
+            return
+        self._service.resolve_approval(approval_id, False)
+        self.statusMessage.emit(self._t("outcome_skipped_status"))
+        self.checkpointChanged.emit(self._run.id)
 
     def _find_pdf_approval(self, approvals: list[ApprovalRequest]) -> ApprovalRequest | None:
         for approval in approvals:

@@ -390,6 +390,26 @@ class ResearchService:
         if run_id:
             self._notify_ui(run_id, "approval_resolved")
 
+    def resolve_outcome_confirmation(self, approval_id: str, outcomes: list[dict[str, Any]]) -> None:
+        """Store the outcomes the user confirmed/edited for the GRADE graph and release it."""
+        run_id: str | None = None
+        with self.database.session() as session:
+            approval = session.get(ApprovalRequest, approval_id)
+            if not approval:
+                return
+            try:
+                details = json.loads(approval.details_json or "{}")
+            except json.JSONDecodeError:
+                details = {}
+            details["confirmed"] = outcomes
+            approval.details_json = json.dumps(details)
+            approval.status = ApprovalStatus.APPROVED.value
+            approval.resolved_at = utcnow()
+            run_id = approval.run_id
+            session.commit()
+        if run_id:
+            self._notify_ui(run_id, "approval_resolved")
+
     async def _execute_run(self, run_id: str) -> None:
         run = self.get_run(run_id)
         if run is None:
