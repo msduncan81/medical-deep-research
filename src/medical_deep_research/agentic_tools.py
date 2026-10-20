@@ -32,6 +32,7 @@ from .provider_config import (
     deepseek_reasoning_effort,
     deepseek_thinking_body,
     local_base_url,
+    local_request_headers,
 )
 from .research import (
     MAX_REPORT_STUDIES,
@@ -1559,6 +1560,7 @@ async def tool_translate_report(
         _log.info("Calling LLM for translation: provider=%s model=%s", provider, model)
         translated = strip_reasoning_blocks(await _call_llm_for_translation(
             provider, model, api_keys, translation_prompt, report_markdown,
+            session_id=f"{request.run_id}-translation",
         ))
         _log.info("Translation returned %d chars", len(translated))
         if not translation_looks_complete(report_markdown, translated):
@@ -1614,6 +1616,7 @@ async def _call_llm_for_translation(
     system_prompt: str,
     report: str,
     user_instruction: str = "Translate the following research report:",
+    session_id: str | None = None,
 ) -> str:
     """Call the provider's LLM with a system prompt and one text (report translation, query translation)."""
     import os
@@ -1677,9 +1680,11 @@ async def _call_llm_for_translation(
 
     # Local / fallback — use OpenAI-compatible endpoint
     from openai import AsyncOpenAI
+    local_url = local_base_url(api_keys)
     local_client = AsyncOpenAI(
         api_key=api_keys.get("local") or os.getenv("MDR_LOCAL_API_KEY", "local"),
-        base_url=local_base_url(api_keys),
+        base_url=local_url,
+        default_headers=local_request_headers(local_url, session_id),
     )
     local_resp = await local_client.chat.completions.create(
         model=model,

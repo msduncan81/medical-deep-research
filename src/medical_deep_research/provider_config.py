@@ -88,6 +88,17 @@ def local_base_url(api_keys: dict[str, str]) -> str:
     )
 
 
+def local_request_headers(base_url: str, session_id: str | None = None) -> dict[str, str]:
+    """Headers for OpenAI-compatible endpoints: an app user agent, plus the per-conversation
+    session id that OpenCode Go requires for routing and prompt caching."""
+    from . import __version__
+
+    headers = {"User-Agent": f"medical-deep-research/{__version__}"}
+    if session_id and "opencode.ai" in (base_url or ""):
+        headers["x-opencode-session"] = session_id
+    return headers
+
+
 def deepseek_api_key(api_keys: dict[str, str]) -> str:
     return (api_keys.get("deepseek") or os.getenv("DEEPSEEK_API_KEY") or "").strip()
 

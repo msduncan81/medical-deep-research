@@ -30,6 +30,7 @@ from .provider_config import (
     deepseek_reasoning_effort,
     deepseek_thinking_body,
     local_base_url,
+    local_request_headers,
     normalize_model_id,
 )
 from .research import (
@@ -557,6 +558,7 @@ async def prepare_request_for_search(request: RunRequest) -> RunRequest:
             _QUERY_TRANSLATION_PROMPT,
             value,
             user_instruction="Translate:",
+            session_id=f"{request.run_id}-query",
         )
         return strip_reasoning_blocks(translated or "")
 
@@ -5497,6 +5499,7 @@ class LangChainLocalRuntime(NativeSDKRuntime):
             model=model,
             base_url=base_url,
             api_key=request.api_keys.get("local") or os.environ.get("MDR_LOCAL_API_KEY") or "local",
+            default_headers=local_request_headers(base_url, request.run_id),
             temperature=0.1,
             timeout=self.request_timeout_seconds,
             max_retries=self.max_retries,
