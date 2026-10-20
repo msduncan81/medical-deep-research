@@ -2115,6 +2115,7 @@ async def tool_fetch_fulltext(
                 text = await fetch_europe_pmc_fulltext_xml(pmcid)
             if not text:
                 return
+            bridge._intermediate.setdefault("fulltext_by_rank", {})[rank] = text
             _store_fulltext_for_rank(request, rank, text, source="europe_pmc_xml")
             found_ranks[rank] = {
                 "rank": rank, "title": s.title, "doi": s.doi, "pmid": s.pmid,

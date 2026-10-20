@@ -100,15 +100,39 @@ class ExtractionRulesTests(unittest.TestCase):
 
     def test_numbers_without_quote_or_outside_ci_are_dropped(self) -> None:
         study = _study(7, "Trial")
-        no_quote = StudyOutcomeData(outcome_id="o1", reported=True, effect=0.8, ci_low=0.6, ci_high=1.0)
+        no_quote = StudyOutcomeData(outcome_id="o1", reported=True, effect=0.8, ci_low=0.6, ci_high=1.0,
+                                    effect_measure="RR")
         self.assertIsNone(_sanitize(no_quote, study, {"o1"}).effect)
 
-        bad_ci = StudyOutcomeData(outcome_id="o1", reported=True, effect=2.0, ci_low=0.6, ci_high=1.0, quote="RR 2.0")
+        bad_ci = StudyOutcomeData(outcome_id="o1", reported=True, effect=2.0, ci_low=0.6, ci_high=1.0, quote="RR 2.0",
+                                  effect_measure="risk ratio")
         cleaned = _sanitize(bad_ci, study, {"o1"})
         self.assertEqual(cleaned.effect, 2.0)
         self.assertIsNone(cleaned.ci_low)
 
         self.assertIsNone(_sanitize(StudyOutcomeData(outcome_id="zz"), study, {"o1"}))
+
+    def test_single_group_proportion_is_not_an_effect_and_measures_are_normalized(self) -> None:
+        study = _study(23, "Trial")
+        proportion = StudyOutcomeData(outcome_id="o1", reported=True, effect=13.0, effect_measure="percentage",
+                                      quote="25 (13%) patients had controlled BP", favours="sideways")
+        cleaned = _sanitize(proportion, study, {"o1"})
+        self.assertIsNone(cleaned.effect)
+        self.assertIsNone(cleaned.effect_measure)
+        self.assertEqual(cleaned.favours, "unclear")
+
+        md = StudyOutcomeData(outcome_id="o1", reported=True, effect=-3.5, ci_low=-5.8, ci_high=-1.2,
+                              effect_measure="mean difference", quote="MD -3.5", favours="intervention")
+        self.assertEqual(_sanitize(md, study, {"o1"}).effect_measure, "MD")
+
+    def test_network_meta_analysis_is_never_the_chosen_review(self) -> None:
+        nma = ReviewCoverage(review_ref=1, title="NMA", year=2025, covered_refs=[3], network=True)
+        pairwise = ReviewCoverage(review_ref=2, title="SR", year=2020, covered_refs=[3])
+        review_map = build_review_map([nma, pairwise])
+        self.assertEqual([r.review_ref for r in review_map.reviews if r.chosen], [2])
+
+        alone = build_review_map([ReviewCoverage(review_ref=1, title="NMA", year=2025, covered_refs=[3], network=True)])
+        self.assertEqual(alone.covered_by_chosen, {})  # its trials are assessed directly
 
 
 class Stage1GraphTests(unittest.IsolatedAsyncioTestCase):
@@ -131,7 +155,8 @@ class Stage1GraphTests(unittest.IsolatedAsyncioTestCase):
             refs = [EvidenceStudy(source="x", source_id="r", title="t", pmid="111")] if study.pmid == "900" else []
             return SearchProviderResult(source="snowball", query="q", studies=refs)
 
-        result = await run_stage1(_request(), studies, structured_call, fetch_references, lambda _s: None)
+        result = await run_stage1(_request(), studies, structured_call, fetch_references, lambda _s: None,
+                                  fetch_full=None)
 
         self.assertFalse(result.outcomes_confirmed_by_user)
         self.assertEqual([o.name for o in result.outcomes], ["PA sistólica"])

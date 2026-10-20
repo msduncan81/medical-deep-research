@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable
 from ..research.models import ScoredStudy
 from .models import OutcomeSpec, ReviewMap, StudyDesign, StudyExtraction, StudyOutcomeData
 from .outcomes import StructuredCall
-from .reviews import is_systematic_review
+from .reviews import is_network_meta_analysis, is_systematic_review
 
 MAX_TEXT_CHARS = 14000
 
@@ -27,9 +27,15 @@ Rules:
 - reported=false when the study does not report that outcome; then leave the numeric fields empty.
 - Copy numbers exactly as written in the text (effect, CI, n, events). Never compute, convert or guess.
   Put the shortest verbatim passage that contains the numbers in "quote". No quote -> no numbers.
+- Only between-group (comparative) effects count. effect_measure must be one of: RR, OR, HR, MD
+  (mean difference), SMD, RD (risk difference). A proportion or mean in one group alone is NOT an effect:
+  leave effect empty (you may still give n and events per group).
+- favours: the group the effect favours according to the text ("intervention", "control", "neither" when
+  no difference, "unclear"). Copy the effect with the sign the text uses; do not flip it yourself.
 - design: "rct", "non_randomized", "systematic_review" or "other".
 - For a systematic review: the pooled estimate for the outcome, studies_in_estimate,
-  participants_in_estimate, and review_grade if the review reports a GRADE certainty for it.
+  participants_in_estimate, heterogeneity_i2 if reported, review_grade if the review reports a GRADE
+  certainty for it, and is_network_meta_analysis=true for a network meta-analysis.
 - population/intervention/comparator/outcome_definition/follow_up: what the study actually did, briefly.
 - risk_of_bias (primary studies, per Core GRADE): "low" or "high" based on randomisation and allocation
   concealment, blinding where it matters for this outcome, missing outcome data and selective reporting;
@@ -76,12 +82,31 @@ def extraction_prompt(study: ScoredStudy, outcomes: list[OutcomeSpec], fulltext:
     )
 
 
+_MEASURE_ALIASES = {
+    "RR": "RR", "RISK RATIO": "RR", "RELATIVE RISK": "RR", "OR": "OR", "ODDS RATIO": "OR",
+    "HR": "HR", "HAZARD RATIO": "HR", "MD": "MD", "MEAN DIFFERENCE": "MD", "WMD": "MD",
+    "DIFFERENCE": "MD", "SMD": "SMD", "STANDARDISED MEAN DIFFERENCE": "SMD",
+    "STANDARDIZED MEAN DIFFERENCE": "SMD", "RD": "RD", "RISK DIFFERENCE": "RD", "ARD": "RD",
+    "ABSOLUTE RISK DIFFERENCE": "RD",
+}
+COMPARATIVE_MEASURES = {"RR", "OR", "HR", "MD", "SMD", "RD"}
+
+
 def _sanitize(item: StudyOutcomeData, study: ScoredStudy, outcome_ids: set[str]) -> StudyOutcomeData | None:
     if item.outcome_id not in outcome_ids:
         return None
     item.study_ref = int(study.reference_number or 0)
     if is_systematic_review(study):
         item.design = StudyDesign.SYSTEMATIC_REVIEW
+    if is_network_meta_analysis(study):
+        item.is_network_meta_analysis = True
+    measure = _MEASURE_ALIASES.get((item.effect_measure or "").strip().upper())
+    item.effect_measure = measure
+    if measure is None:
+        # Not a between-group effect (e.g. a proportion in one arm): keep counts, drop the "effect".
+        item.effect = item.ci_low = item.ci_high = None
+    if item.favours not in {"intervention", "control", "neither", "unclear"}:
+        item.favours = "unclear"
     has_numbers = any(v is not None for v in (item.effect, item.events_intervention, item.n_intervention))
     if has_numbers and not item.quote.strip():
         # Numbers without a supporting passage are not trusted.
@@ -98,10 +123,14 @@ def _sanitize(item: StudyOutcomeData, study: ScoredStudy, outcome_ids: set[str])
 
 def studies_to_extract(studies: list[ScoredStudy], review_map: ReviewMap) -> tuple[list[ScoredStudy], list[str]]:
     chosen_reviews = {r.review_ref for r in review_map.reviews if r.chosen}
+    network_reviews = {r.review_ref for r in review_map.reviews if r.network}
     skipped_reviews = {r.review_ref for r in review_map.reviews if not r.chosen}
     selected, notes = [], []
     for study in studies:
         ref = int(study.reference_number or 0)
+        if ref in network_reviews:
+            notes.append(f"[{ref}] not extracted: network meta-analysis (outside Core GRADE).")
+            continue
         if ref in skipped_reviews:
             notes.append(f"[{ref}] not extracted: overlaps with a chosen review.")
             continue

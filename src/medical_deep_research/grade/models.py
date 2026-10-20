@@ -68,6 +68,7 @@ class ReviewCoverage(BaseModel):
     year: int | None = None
     covered_refs: list[int] = Field(default_factory=list, description="Ranked primary studies it includes.")
     reference_count: int = 0
+    network: bool = Field(default=False, description="Network meta-analysis (outside Core GRADE).")
     chosen: bool = False
     reason: str = ""
 
@@ -107,6 +108,9 @@ class StudyOutcomeData(BaseModel):
     risk_of_bias: RiskOfBias = RiskOfBias.UNCLEAR
     risk_of_bias_rationale: str = ""
     review_grade: str | None = Field(default=None, description="Certainty reported by a review, if any.")
+    favours: str = Field(default="unclear", description="'intervention', 'control', 'neither' or 'unclear'.")
+    heterogeneity_i2: float | None = Field(default=None, description="I² (%) reported by a review.")
+    is_network_meta_analysis: bool = False
     source_text: str = Field(default="abstract", description="'abstract' or 'fulltext'.")
     quote: str = Field(default="", description="Short verbatim passage supporting the numbers.")
 

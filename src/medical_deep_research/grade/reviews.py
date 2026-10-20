@@ -30,6 +30,14 @@ def is_systematic_review(study: EvidenceStudy) -> bool:
     return "cochrane" in (study.source or "").lower() or "cochrane" in (study.journal or "").lower()
 
 
+_NMA_RE = re.compile(r"network\s+meta[\s-]?analys", re.IGNORECASE)
+
+
+def is_network_meta_analysis(study: EvidenceStudy) -> bool:
+    """Core GRADE covers pairwise comparisons; network meta-analyses are out of scope (Core GRADE 1)."""
+    return bool(_NMA_RE.search(f"{study.title or ''} {study.abstract or ''}"))
+
+
 def _norm_doi(doi: str | None) -> str:
     return re.sub(r"^https?://(dx\.)?doi\.org/", "", (doi or "").strip().lower())
 
@@ -96,7 +104,13 @@ def build_review_map(reviews: list[ReviewCoverage]) -> ReviewMap:
     notes: list[str] = []
     for group in groups:
         members = [by_ref[ref] for ref in group]
-        chosen = max(members, key=lambda r: (r.year or 0, len(r.covered_refs)))
+        pairwise = [r for r in members if not r.network]
+        for review in members:
+            if review.network:
+                review.reason = "network meta-analysis (outside Core GRADE); its trials are assessed directly"
+        if not pairwise:
+            continue
+        chosen = max(pairwise, key=lambda r: (r.year or 0, len(r.covered_refs)))
         chosen.chosen = True
         chosen.reason = (
             "only review in its group"
@@ -104,7 +118,7 @@ def build_review_map(reviews: list[ReviewCoverage]) -> ReviewMap:
             else f"most recent / widest coverage among overlapping reviews {group}"
         )
         for other in members:
-            if other is not chosen:
+            if other is not chosen and not other.network:
                 other.reason = f"overlaps with chosen review [{chosen.review_ref}]"
         for ref in chosen.covered_refs:
             covered_by_chosen.setdefault(ref, chosen.review_ref)
@@ -144,6 +158,7 @@ async def map_reviews(
             year=_year(review),
             covered_refs=match_references(references, primaries),
             reference_count=len(references),
+            network=is_network_meta_analysis(review),
         )
 
     coverages = await asyncio.gather(*(coverage(r) for r in reviews_in_pool))

@@ -1,6 +1,7 @@
 """GRADE pipeline as an explicit LangGraph state graph — stage 1: outcomes, review map, extraction.
 
-    propose_outcomes (A2) -> confirm_outcomes (A2, user) -> map_reviews (B4) -> extract (B6) -> END
+    propose_outcomes (A2) -> confirm_outcomes (A2, user) -> map_reviews (B4)
+        -> fetch_fulltext (B5) -> extract (B6) -> END
 
 Later stages add the per-outcome assessment (bodies of evidence by design, the five domains, rating
 up, certainty) and the outputs (evidence profile, Summary of Findings, report). Each node receives only
@@ -15,6 +16,7 @@ from typing import Any, TypedDict
 from ..models import RunRequest
 from ..research.models import ScoredStudy
 from .extraction import extract_all, studies_to_extract
+from .fulltext import fetch_missing_fulltexts
 from .models import GradeStage1Result, OutcomeSpec, ReviewMap, StudyExtraction
 from .outcomes import StructuredCall, confirm_outcomes, propose_outcomes
 from .reviews import ReferenceFetcher, map_reviews
@@ -27,6 +29,7 @@ class GradeState(TypedDict, total=False):
     outcomes: list[OutcomeSpec]
     outcomes_confirmed_by_user: bool
     review_map: ReviewMap
+    fulltexts: dict[int, str]
     extractions: list[StudyExtraction]
     notes: list[str]
 
@@ -38,11 +41,15 @@ async def _noop(_node: str, _message: str) -> None:
     return None
 
 
+FullTextFetcher = Callable[[list[ScoredStudy], dict[int, str]], Awaitable[dict[int, str]]]
+
+
 def build_stage1_graph(
     structured_call: StructuredCall,
     fetch_references: ReferenceFetcher,
     fulltext_for: Callable[[ScoredStudy], str | None],
     progress: Progress = _noop,
+    fetch_full: FullTextFetcher | None = fetch_missing_fulltexts,
 ) -> Any:
     from langgraph.graph import END, START, StateGraph
 
@@ -62,14 +69,25 @@ def build_stage1_graph(
         review_map = await map_reviews(state["studies"], fetch_references)
         return {"review_map": review_map, "notes": [*state.get("notes", []), *review_map.notes]}
 
+    async def node_fetch_fulltext(state: GradeState) -> dict[str, Any]:
+        selected, _ = studies_to_extract(state["studies"], state["review_map"])
+        known = {int(st.reference_number or 0): text for st in selected if (text := fulltext_for(st))}
+        await progress("fetch_fulltext", f"Looking for open full text ({len(known)} of {len(selected)} already read)")
+        found = await fetch_full(selected, known) if fetch_full else {}
+        notes = [*state.get("notes", []),
+                 f"Full text available for {len(known) + len(found)} of {len(selected)} extracted studies."]
+        return {"fulltexts": {**known, **found}, "notes": notes}
+
     async def node_extract(state: GradeState) -> dict[str, Any]:
         selected, skip_notes = studies_to_extract(state["studies"], state["review_map"])
+        texts = state.get("fulltexts", {})
 
         async def on_progress(study: ScoredStudy) -> None:
             await progress("extract", f"Extracting outcome data from [{study.reference_number}]")
 
         extractions, fail_notes = await extract_all(
-            structured_call, selected, state["outcomes"], fulltext_for, on_progress=on_progress
+            structured_call, selected, state["outcomes"],
+            lambda st: texts.get(int(st.reference_number or 0)), on_progress=on_progress,
         )
         return {"extractions": extractions, "notes": [*state.get("notes", []), *skip_notes, *fail_notes]}
 
@@ -77,11 +95,13 @@ def build_stage1_graph(
     graph.add_node("propose_outcomes", node_propose)
     graph.add_node("confirm_outcomes", node_confirm)
     graph.add_node("map_reviews", node_map_reviews)
+    graph.add_node("fetch_fulltext", node_fetch_fulltext)
     graph.add_node("extract", node_extract)
     graph.add_edge(START, "propose_outcomes")
     graph.add_edge("propose_outcomes", "confirm_outcomes")
     graph.add_edge("confirm_outcomes", "map_reviews")
-    graph.add_edge("map_reviews", "extract")
+    graph.add_edge("map_reviews", "fetch_fulltext")
+    graph.add_edge("fetch_fulltext", "extract")
     graph.add_edge("extract", END)
     return graph.compile()
 
@@ -93,8 +113,9 @@ async def run_stage1(
     fetch_references: ReferenceFetcher,
     fulltext_for: Callable[[ScoredStudy], str | None],
     progress: Progress = _noop,
+    fetch_full: FullTextFetcher | None = fetch_missing_fulltexts,
 ) -> GradeStage1Result:
-    graph = build_stage1_graph(structured_call, fetch_references, fulltext_for, progress)
+    graph = build_stage1_graph(structured_call, fetch_references, fulltext_for, progress, fetch_full)
     final: GradeState = await graph.ainvoke({"request": request, "studies": studies, "notes": []})
     return GradeStage1Result(
         outcomes=final.get("outcomes", []),
