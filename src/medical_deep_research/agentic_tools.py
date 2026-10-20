@@ -605,6 +605,7 @@ async def tool_get_studies(request: RunRequest, bridge: AgenticEventBridge, cont
     bridge._pre_scored = pre_scored
     # Re-deriving the pool invalidates any prior screening decision.
     bridge.screening = None
+    bridge._intermediate["browse_calls_this_pool"] = 0
     display = _tier_ordered(pre_scored)
     page = display[:STUDY_PAGE_SIZE]
     return {
@@ -625,6 +626,14 @@ async def tool_get_studies(request: RunRequest, bridge: AgenticEventBridge, cont
     }
 
 
+MAX_BROWSE_CALLS_PER_POOL = 6
+
+
+def max_browse_calls_per_pool() -> int:
+    raw = os.getenv("MDR_MAX_BROWSE_CALLS_PER_POOL", "")
+    return int(raw) if raw.isdigit() and int(raw) > 0 else MAX_BROWSE_CALLS_PER_POOL
+
+
 async def tool_browse_studies(
     request: RunRequest,
     bridge: AgenticEventBridge,
@@ -641,6 +650,16 @@ async def tool_browse_studies(
     pool = bridge._pre_scored
     if not pool:
         return {"error": "Call get_studies first.", "studies": []}
+    calls = int(bridge._intermediate.get("browse_calls_this_pool", 0)) + 1
+    bridge._intermediate["browse_calls_this_pool"] = calls
+    if calls > max_browse_calls_per_pool():
+        return {
+            "error": (
+                f"browse_studies limit reached ({max_browse_calls_per_pool()} calls for this study pool). "
+                "Stop browsing and call screen_studies with the studies you have reviewed."
+            ),
+            "studies": [],
+        }
     display = _tier_ordered(pool)
     if evidence_level:
         want = _evidence_level_rank(evidence_level)

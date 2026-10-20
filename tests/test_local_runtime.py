@@ -386,6 +386,33 @@ class LocalRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Plan the sections first", final.report_markdown or "")
 
 
+class UnsubmittedReportTests(unittest.IsolatedAsyncioTestCase):
+    collect_events = LocalRuntimeTests.collect_events
+
+    async def test_report_written_as_final_message_goes_through_submit_report(self) -> None:
+        report = make_valid_report().strip()
+
+        class FakeAIMessage:
+            content = report
+
+        async def agent(tools: list[object], _inputs: dict[str, object]) -> object:
+            await call_fake_tool(tools, "search_pubmed", query="cardiac surgery ESPB PCA pain", max_results=3)
+            await call_fake_tool(tools, "get_studies", context="clinical")
+            await call_fake_tool(tools, "finalize_ranking", ranked_indices=[1], rationale="Most relevant RCT.")
+            return {"messages": [FakeAIMessage()]}
+
+        async def fake_synthesize(_request: object, bridge: object) -> dict[str, object]:
+            bridge._intermediate["synthesize_report"] = {}  # type: ignore[attr-defined]
+            return {}
+
+        with patch("medical_deep_research.runtime.tool_synthesize_report", fake_synthesize):
+            events = await self.collect_events(agent)
+        final = [event for event in events if event.event_type == EventType.RUN_COMPLETED][-1]
+
+        self.assertEqual(final.extra["report_source"], "submitted_report")
+        self.assertIn("## 4. Results/Findings", final.report_markdown or "")
+
+
 class ContextTrimTests(unittest.TestCase):
     def _history(self, tool_outputs: int, size: int) -> list[object]:
         from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -416,6 +443,51 @@ class ContextTrimTests(unittest.TestCase):
         self.assertTrue(all(len(m.content) == 9000 for m in tools[-6:]))
         self.assertEqual([m.tool_call_id for m in tools], [f"call_{i}" for i in range(20)])
         self.assertEqual(len(messages[2].content), 9000)  # the original list is not modified
+
+
+class BlockTrimTests(unittest.TestCase):
+    _history = ContextTrimTests._history
+
+    def test_trimming_happens_in_blocks_and_keeps_earlier_stubs(self) -> None:
+        from medical_deep_research.runtime import _estimate_tokens, trim_tool_outputs_for_context
+
+        stubbed: set[str] = set()
+        first = trim_tool_outputs_for_context(
+            self._history(20, 9000), budget_tokens=40_000, keep_recent=6, stubbed=stubbed, target_fraction=0.6
+        )
+        self.assertLessEqual(_estimate_tokens(first), 24_000)
+        first_stubbed = set(stubbed)
+        self.assertTrue(first_stubbed)
+
+        # One more turn: still under budget, so nothing new is stubbed and earlier stubs are re-applied.
+        second = trim_tool_outputs_for_context(
+            self._history(21, 9000), budget_tokens=40_000, keep_recent=6, stubbed=stubbed, target_fraction=0.6
+        )
+        self.assertEqual(stubbed, first_stubbed)
+        for a, b in zip(first, second):
+            self.assertEqual(a.content, b.content)
+
+
+class BrowseLimitTests(unittest.IsolatedAsyncioTestCase):
+    async def test_browse_studies_is_capped_per_pool_and_reset_by_get_studies(self) -> None:
+        from medical_deep_research.agentic_tools import (
+            AgenticEventBridge,
+            max_browse_calls_per_pool,
+            tool_browse_studies,
+            tool_get_studies,
+        )
+
+        bridge = AgenticEventBridge()
+        bridge.search_results.append(await fake_multi_search_source("PubMed", "q"))
+        request = make_request()
+        await tool_get_studies(request, bridge, context="clinical")
+        for _ in range(max_browse_calls_per_pool()):
+            self.assertNotIn("error", await tool_browse_studies(request, bridge, page=1))
+        blocked = await tool_browse_studies(request, bridge, page=2)
+        self.assertIn("limit reached", blocked["error"])
+
+        await tool_get_studies(request, bridge, context="clinical")
+        self.assertNotIn("error", await tool_browse_studies(request, bridge, page=1))
 
 
 class ReasoningAndTranslationHelperTests(unittest.TestCase):

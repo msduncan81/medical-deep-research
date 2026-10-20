@@ -5,6 +5,7 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import time
@@ -108,6 +109,7 @@ LOCAL_CONTEXT_TOKENS_FALLBACK = 32768
 LOCAL_ANSWER_RESERVE_TOKENS = 12000
 LOCAL_TOOL_SCHEMA_RESERVE_TOKENS = 4000
 LOCAL_KEEP_RECENT_TOOL_OUTPUTS = 6
+LOCAL_TRIM_TARGET_FRACTION = 0.6
 _CHARS_PER_TOKEN = 3.0
 CODEX_AGENTIC_TIMEOUT_SECONDS = 1800.0
 CODEX_AGENTIC_HEARTBEAT_SECONDS = 15.0
@@ -142,6 +144,10 @@ def _env_int(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
+def _report_word_count_estimate(text: str) -> int:
+    return len(re.findall(r"\w+", text))
+
+
 def _message_chars(message: Any) -> int:
     size = len(str(getattr(message, "content", "") or ""))
     tool_calls = getattr(message, "tool_calls", None)
@@ -154,44 +160,79 @@ def _estimate_tokens(messages: list[Any]) -> int:
     return int(sum(_message_chars(m) for m in messages) / _CHARS_PER_TOKEN)
 
 
+def _tool_message_key(message: Any, index: int) -> str:
+    return str(getattr(message, "tool_call_id", None) or getattr(message, "id", None) or index)
+
+
+def _tool_output_stub(message: Any) -> str:
+    name = getattr(message, "name", None) or "tool"
+    return (
+        f"[Earlier output of {name} omitted to fit the context window. The data is kept in "
+        "shared research state; call the tool again (e.g. browse_studies) if you need it.]"
+    )
+
+
 def trim_tool_outputs_for_context(
     messages: list[Any],
     budget_tokens: int,
     keep_recent: int = LOCAL_KEEP_RECENT_TOOL_OUTPUTS,
+    *,
+    stubbed: set[str] | None = None,
+    target_fraction: float = 1.0,
 ) -> list[Any]:
-    """Replace the content of old tool messages with a stub until the history fits ``budget_tokens``.
+    """Replace the content of old tool messages with a stub so the history fits ``budget_tokens``.
 
     Message order and tool-call/tool-result pairing are preserved; only tool outputs are
     shortened, oldest first, and the most recent ``keep_recent`` outputs are left intact.
     The full data stays in the shared research state, so the agent can re-query it.
+
+    ``stubbed`` carries the keys of outputs already stubbed by earlier calls: they are stubbed
+    again so the prompt prefix stays identical between turns (the server's prompt cache keeps
+    working). When trimming is needed it goes down to ``budget_tokens * target_fraction``, so
+    it happens in blocks rather than on every turn.
     """
-    total = _estimate_tokens(messages)
-    if total <= budget_tokens:
-        return messages
-    tool_positions = [i for i, m in enumerate(messages) if getattr(m, "type", None) == "tool"]
-    candidates = tool_positions[:-keep_recent] if keep_recent > 0 else tool_positions
+    stubbed = stubbed if stubbed is not None else set()
     trimmed = list(messages)
+    changed = False
+    for index, message in enumerate(trimmed):
+        if getattr(message, "type", None) == "tool" and _tool_message_key(message, index) in stubbed:
+            stub = _tool_output_stub(message)
+            if message.content != stub:
+                trimmed[index] = message.model_copy(update={"content": stub})
+                changed = True
+    total = _estimate_tokens(trimmed)
+    if total <= budget_tokens:
+        return trimmed if changed else messages
+    target = int(budget_tokens * target_fraction)
+    tool_positions = [i for i, m in enumerate(trimmed) if getattr(m, "type", None) == "tool"]
+    candidates = tool_positions[:-keep_recent] if keep_recent > 0 else tool_positions
     for index in candidates:
-        if total <= budget_tokens:
+        if total <= target:
             break
         message = trimmed[index]
+        key = _tool_message_key(message, index)
+        if key in stubbed:
+            continue
+        stub = _tool_output_stub(message)
         old_chars = len(str(message.content or ""))
-        name = getattr(message, "name", None) or "tool"
-        stub = (
-            f"[Earlier output of {name} omitted to fit the context window. The data is kept in "
-            "shared research state; call the tool again (e.g. browse_studies) if you need it.]"
-        )
         if old_chars <= len(stub) + 200:
             continue
         trimmed[index] = message.model_copy(update={"content": stub})
+        stubbed.add(key)
         total -= int((old_chars - len(stub)) / _CHARS_PER_TOKEN)
     return trimmed
 
 
 def _context_trim_hook(budget_tokens: int) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    stubbed: set[str] = set()
+
     def hook(state: dict[str, Any]) -> dict[str, Any]:
         messages = list(state.get("messages") or [])
-        return {"llm_input_messages": trim_tool_outputs_for_context(messages, budget_tokens)}
+        return {
+            "llm_input_messages": trim_tool_outputs_for_context(
+                messages, budget_tokens, stubbed=stubbed, target_fraction=LOCAL_TRIM_TARGET_FRACTION
+            )
+        }
 
     return hook
 
@@ -5539,6 +5580,7 @@ class LangChainLocalRuntime(NativeSDKRuntime):
                 yield event
             return
 
+        await self._submit_unsubmitted_report(request, bridge)
         agent_text = bridge._result or ""
         final_report, report_source = _select_agentic_final_report(
             request, bridge, self.runtime_name, agent_text
@@ -5550,6 +5592,31 @@ class LangChainLocalRuntime(NativeSDKRuntime):
 
         for event in _agentic_final_events(self, request, final_report, bridge, report_source=report_source):
             yield event
+
+    async def _submit_unsubmitted_report(self, request: RunRequest, bridge: AgenticEventBridge) -> None:
+        """Run a report the model wrote as plain text (instead of calling submit_report) through submit_report.
+
+        Local models sometimes end with the full report as their final message. Passing it through the
+        same quality gate and deterministic reference rendering keeps the synthesis instead of falling
+        back to the template.
+        """
+        if bridge._intermediate.get("submitted_report") or not bridge.ranked_studies:
+            return
+        if "local_recovered_after_submit_rejection" in bridge._intermediate:
+            return
+        candidate = strip_reasoning_blocks(bridge._result or "")
+        if _report_word_count_estimate(candidate) < 400 or "## " not in candidate:
+            return
+        try:
+            if "synthesize_report" not in bridge._intermediate:
+                await tool_synthesize_report(request, bridge)  # enriches reference metadata
+            result = await tool_submit_report(request, bridge, candidate)
+        except Exception as exc:  # noqa: BLE001 - keep the recovered report on any failure
+            _log.warning("Submitting the agent's final message as report failed: %s", exc)
+            return
+        bridge._intermediate["final_message_submitted_by_runtime"] = {
+            key: result.get(key) for key in ("status", "error", "rejection_count")
+        }
 
     async def _history_token_budget(self, request: RunRequest, system_prompt: str) -> int | None:
         """Token budget for the message history, from the local server's context window."""
