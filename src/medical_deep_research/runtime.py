@@ -51,6 +51,7 @@ from .agentic_tools import (
     agentic_system_prompt,
     recover_report_from_bridge,
     report_quality_issues,
+    strip_reasoning_blocks,
     tool_appraise_evidence,
     tool_await_user_pdfs,
     tool_browse_studies,
@@ -88,7 +89,14 @@ APPRAISAL_TIMEOUT_SECONDS = 30.0
 FINAL_SYNTHESIS_TIMEOUT_SECONDS = 25.0
 ANTHROPIC_AGENTIC_TIMEOUT_SECONDS = 300.0
 ANTHROPIC_AGENTIC_MAX_TURNS = 25
-LOCAL_AGENTIC_TIMEOUT_SECONDS = 600.0
+LOCAL_AGENTIC_TIMEOUT_SECONDS = 1800.0
+LOCAL_FIRST_TOOL_TIMEOUT_SECONDS = 300.0
+LOCAL_REQUEST_TIMEOUT_SECONDS = 300.0
+LOCAL_MAX_RETRIES = 2
+LOCAL_RECURSION_LIMIT = 150
+# Local models get this many submit_report rejections (i.e. rewrites) before
+# the run stops and recovers the report from the shared research state.
+LOCAL_REPORT_REJECTIONS_BEFORE_RECOVERY = 2
 CODEX_AGENTIC_TIMEOUT_SECONDS = 1800.0
 CODEX_AGENTIC_HEARTBEAT_SECONDS = 15.0
 CODEX_AGENTIC_MAX_TOOL_TURNS = 50
@@ -120,6 +128,10 @@ def _env_int(name: str, default: int) -> int:
     except ValueError:
         return default
     return value if value > 0 else default
+
+
+def _local_report_rejections_before_recovery() -> int:
+    return _env_int("MDR_LOCAL_REPORT_REJECTIONS_BEFORE_RECOVERY", LOCAL_REPORT_REJECTIONS_BEFORE_RECOVERY)
 
 
 def _ev(
@@ -753,6 +765,8 @@ def _langchain_final_text(result: Any) -> str | None:
         for message in reversed(list(messages)):
             text = _message_content_text(message)
             if text:
+                text = strip_reasoning_blocks(text)
+            if text:
                 return text
     final_output = result.get("final_output") if isinstance(result, dict) else getattr(result, "final_output", None)
     if isinstance(final_output, str) and final_output.strip():
@@ -1012,7 +1026,7 @@ class DeterministicRuntime(ResearchRuntime):
             ranked,
             api_keys=request.api_keys,
             offline_mode=request.offline_mode,
-            limit=8,
+            limit=MAX_REPORT_STUDIES,
         )
         verification_report = render_verification_report(verification)
         if not ranked:
@@ -1694,7 +1708,7 @@ class NativeSDKRuntime(DeterministicRuntime):
             ranked,
             api_keys=request.api_keys,
             offline_mode=request.offline_mode,
-            limit=8,
+            limit=MAX_REPORT_STUDIES,
         )
         if not ranked:
             verification = empty_verification_summary(
@@ -4964,7 +4978,11 @@ def _build_langchain_tools(
         await bridge.on_tool_end("submit_report", result)
         if result.get("fatal"):
             raise _ReportRejected(str(result.get("fallback_reason") or result.get("error")))
-        if stop_after_report_rejection and result.get("error") and result.get("rejection_count"):
+        if (
+            stop_after_report_rejection
+            and result.get("error")
+            and int(result.get("rejection_count") or 0) >= _local_report_rejections_before_recovery()
+        ):
             raise _ReportRecoveryRequested(str(result.get("error")))
         if stop_after_submit and result.get("status") == "ok":
             raise _ReportSubmitted()
@@ -5245,6 +5263,11 @@ class LangChainLocalRuntime(NativeSDKRuntime):
     synthesis_agent_name = "Local Synthesis Agent"
     verifier_name = "Local Verification Agent"
     native_agent_name = "Local LLM Research Agent"
+    agentic_timeout_seconds = _env_float("MDR_LOCAL_AGENTIC_TIMEOUT_SECONDS", LOCAL_AGENTIC_TIMEOUT_SECONDS)
+    first_tool_timeout_seconds = _env_float("MDR_LOCAL_FIRST_TOOL_TIMEOUT_SECONDS", LOCAL_FIRST_TOOL_TIMEOUT_SECONDS)
+    request_timeout_seconds = _env_float("MDR_LOCAL_REQUEST_TIMEOUT_SECONDS", LOCAL_REQUEST_TIMEOUT_SECONDS)
+    max_retries = _env_int("MDR_LOCAL_MAX_RETRIES", LOCAL_MAX_RETRIES)
+    recursion_limit = _env_int("MDR_LOCAL_RECURSION_LIMIT", LOCAL_RECURSION_LIMIT)
 
     @property
     def sdk_available(self) -> bool:
@@ -5270,6 +5293,8 @@ class LangChainLocalRuntime(NativeSDKRuntime):
             base_url=base_url,
             api_key=request.api_keys.get("local") or os.environ.get("MDR_LOCAL_API_KEY") or "local",
             temperature=0.1,
+            timeout=self.request_timeout_seconds,
+            max_retries=self.max_retries,
             disabled_params={"parallel_tool_calls": None},
         )
 
@@ -5296,16 +5321,59 @@ class LangChainLocalRuntime(NativeSDKRuntime):
         )
 
         while True:
-            queued: RuntimeEventPayload | None = await bridge.queue.get()
+            # Watchdog: a local model that never starts calling tools (stalled
+            # server, unparseable tool-call format) must not hang the run.
+            timeout = self.first_tool_timeout_seconds if bridge._tool_call_count == 0 else None
+            try:
+                queued: RuntimeEventPayload | None = await asyncio.wait_for(bridge.queue.get(), timeout=timeout)
+            except asyncio.TimeoutError:
+                if bridge._tool_call_count == 0 and not agent_task.done():
+                    bridge._intermediate["startup_timeout_reason"] = (
+                        f"{self.runtime_name} did not begin tool use within "
+                        f"{self.first_tool_timeout_seconds:g}s; running deterministic fallback."
+                    )
+                    agent_task.cancel()
+                    break
+                continue
             if queued is None:
                 break
             yield queued
 
         try:
             await agent_task
+        except asyncio.CancelledError:
+            pass
         except Exception as exc:
             _log.warning("LangChain local agent task error: %s", exc)
             bridge.set_error(exc)
+
+        fallback_reason = self._agentic_fallback_reason(bridge)
+        if fallback_reason:
+            failure_diagnostics = _agentic_failure_diagnostics(bridge)
+            yield _ev(
+                bridge.progress,
+                EventType.AGENT_STARTED,
+                bridge.progress.current_phase or "planning",
+                f"{fallback_reason} Running deterministic fallback.",
+                agent_name=self.native_agent_name,
+                extra={
+                    "fallback_reason": fallback_reason,
+                    "tool_calls": bridge._tool_call_count,
+                    "had_error": bridge._error is not None,
+                    "error_message": _format_exception(bridge._error),
+                    "execution_mode": "deterministic_fallback",
+                    "runtime_engine": self.runtime_engine,
+                    "source_execution_mode": "native_sdk_agentic",
+                    "report_source": "deterministic_fallback",
+                    **failure_diagnostics,
+                },
+            )
+            fallback_runtime = AgenticFailureFallbackRuntime(
+                self, fallback_reason, failure_diagnostics, tracker=bridge.progress
+            )
+            async for event in fallback_runtime.stream_run(request):
+                yield event
+            return
 
         agent_text = bridge._result or ""
         final_report, report_source = _select_agentic_final_report(
@@ -5318,6 +5386,30 @@ class LangChainLocalRuntime(NativeSDKRuntime):
 
         for event in _agentic_final_events(self, request, final_report, bridge, report_source=report_source):
             yield event
+
+    def _agentic_fallback_reason(self, bridge: AgenticEventBridge) -> str | None:
+        """Reason to discard the agentic run and use the deterministic pipeline.
+
+        Unlike the Anthropic runtime, a local run that searched but failed later
+        keeps its recovered report; only runs with no search evidence at all fall
+        back, so an uncited free-text answer is never presented as a report.
+        """
+        startup_timeout_reason = bridge._intermediate.get("startup_timeout_reason")
+        if startup_timeout_reason:
+            return str(startup_timeout_reason)
+        submitted = bridge._intermediate.get("submitted_report")
+        if isinstance(submitted, str) and submitted.strip():
+            return None
+        if bridge.search_results:
+            return None
+        if bridge._error is not None:
+            return (
+                f"{self.runtime_name} failed before completing any search tools "
+                f"({_format_exception(bridge._error)})."
+            )
+        if bridge._tool_call_count > 0:
+            return f"{self.runtime_name} completed without executing any search tools."
+        return f"{self.runtime_name} completed without calling any research tools."
 
     async def _run_langchain_agent(
         self,
@@ -5342,10 +5434,11 @@ class LangChainLocalRuntime(NativeSDKRuntime):
                 nonlocal final_text
                 result = await agent.ainvoke(
                     {"messages": [HumanMessage(content=_agentic_user_prompt(request))]},
+                    config={"recursion_limit": self.recursion_limit},
                 )
                 final_text = _langchain_final_text(result)
 
-            await _inner()
+            await asyncio.wait_for(_inner(), timeout=self.agentic_timeout_seconds)
             if "submitted_report" in bridge._intermediate:
                 bridge._intermediate["agent_final_message"] = final_text
             else:
@@ -5359,8 +5452,8 @@ class LangChainLocalRuntime(NativeSDKRuntime):
             _log.warning("LangChain local agent stopped after repeated report rejection: %s", exc)
             bridge.set_error(exc)
         except asyncio.TimeoutError:
-            _log.warning("LangChain local agent timed out after %ss", LOCAL_AGENTIC_TIMEOUT_SECONDS)
-            bridge.set_error(TimeoutError(f"Agent timed out after {LOCAL_AGENTIC_TIMEOUT_SECONDS}s"))
+            _log.warning("LangChain local agent timed out after %ss", self.agentic_timeout_seconds)
+            bridge.set_error(TimeoutError(f"Agent timed out after {self.agentic_timeout_seconds:g}s"))
         except Exception as exc:
             _log.warning("LangChain local agent failed: %s", exc)
             bridge.set_error(exc)

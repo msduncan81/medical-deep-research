@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -59,6 +60,35 @@ async def verify_pmids_in_pubmed(
             results[pmid] = (False, issue)
         else:
             results[pmid] = (True, None)
+    return results
+
+
+async def verify_dois_in_crossref(dois: list[str]) -> dict[str, tuple[bool | None, str | None]]:
+    """Check that DOIs resolve in Crossref (for studies without a PMID, e.g. LILACS/SciELO)."""
+    unique_dois = list(dict.fromkeys(doi for doi in dois if doi))
+    if not unique_dois:
+        return {}
+    headers = {"User-Agent": f"medical-deep-research/1.0 (mailto:{POLITE_EMAIL})"}
+    semaphore = asyncio.Semaphore(4)
+    results: dict[str, tuple[bool | None, str | None]] = {}
+
+    async def check(client: httpx.AsyncClient, doi: str) -> None:
+        clean = re.sub(r"^https?://(dx\.)?doi\.org/", "", doi.strip())
+        async with semaphore:
+            try:
+                response = await client.get(f"https://api.crossref.org/works/{clean}", headers=headers)
+            except httpx.HTTPError as exc:
+                results[doi] = (None, f"Crossref check failed: {type(exc).__name__}")
+                return
+        if response.status_code == 200:
+            results[doi] = (True, None)
+        elif response.status_code == 404:
+            results[doi] = (False, "DOI not found in Crossref")
+        else:
+            results[doi] = (None, f"Crossref check failed: HTTP {response.status_code}")
+
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        await asyncio.gather(*(check(client, doi) for doi in unique_dois))
     return results
 
 
@@ -249,14 +279,31 @@ async def verify_studies(
             issue = f"{type(exc).__name__}: {exc}"
             verification_map = {pmid: (None, issue) for pmid in pmids_to_verify}
 
+    dois_to_verify = [study.doi for study in considered if not study.pmid and study.doi]
+    doi_map: dict[str, tuple[bool | None, str | None]] = {}
+    if not offline_mode and dois_to_verify:
+        try:
+            doi_map = await verify_dois_in_crossref(dois_to_verify)
+        except Exception as exc:  # pragma: no cover - defensive path
+            doi_map = {doi: (None, f"{type(exc).__name__}: {exc}") for doi in dois_to_verify}
+    verified_dois = 0
+
     for study in considered:
         if not study.pmid:
             missing_pmids += 1
+            issue = "No PMID available for verification"
+            if study.doi and study.doi in doi_map:
+                exists_doi, doi_issue = doi_map[study.doi]
+                if exists_doi:
+                    verified_dois += 1
+                    issue = "No PMID; DOI verified in Crossref"
+                else:
+                    issue = f"No PMID; {doi_issue or 'DOI not verified'}"
             details.append(
                 VerificationDetail(
                     reference_number=study.reference_number,
                     title=study.title,
-                    issue="No PMID available for verification",
+                    issue=issue,
                 )
             )
             continue
@@ -292,6 +339,8 @@ async def verify_studies(
 
     if offline_mode:
         notes.append("Offline mode prevented live PMID verification.")
+    if dois_to_verify:
+        notes.append(f"DOIs verified in Crossref (studies without PMID): {verified_dois} of {len(dois_to_verify)}")
     return VerificationSummary(
         total_considered=min(len(studies), limit),
         verified_pmids=verified_pmids,

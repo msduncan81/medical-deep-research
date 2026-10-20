@@ -43,6 +43,10 @@ class AlwaysAvailableLocalRuntime(LangChainLocalRuntime):
         return True
 
 
+invocations: list[dict[str, object]] = []
+chat_models: list[object] = []
+
+
 @contextmanager
 def fake_langgraph_agent(agent_impl: Callable[[list[object], dict[str, object]], Any]) -> object:
     core_tools_module = types.ModuleType("langchain_core.tools")
@@ -56,7 +60,8 @@ def fake_langgraph_agent(agent_impl: Callable[[list[object], dict[str, object]],
         def __init__(self, tools: list[object]) -> None:
             self.tools = tools
 
-        async def ainvoke(self, inputs: dict[str, object]) -> object:
+        async def ainvoke(self, inputs: dict[str, object], config: dict[str, object] | None = None) -> object:
+            invocations.append({"inputs": inputs, "config": config})
             result = agent_impl(self.tools, inputs)
             if hasattr(result, "__await__"):
                 return await result
@@ -65,6 +70,7 @@ def fake_langgraph_agent(agent_impl: Callable[[list[object], dict[str, object]],
     class FakeChatOpenAI:
         def __init__(self, **kwargs: object) -> None:
             self.kwargs = kwargs
+            chat_models.append(self)
 
     class FakeMessage:
         def __init__(self, content: object = None, **_kwargs: object) -> None:
@@ -256,17 +262,41 @@ class LocalRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final.extra["report_source"], "submitted_report")
         self.assertEqual(final.report_markdown, report)
 
-    async def test_local_runtime_recovers_after_first_rejected_submit_report(self) -> None:
-        report = make_valid_report().replace(
+    def _rejected_report(self) -> str:
+        return make_valid_report().replace(
             "available ranked set is small [1].",
             "available ranked set is small [1] [12].",
         )
+
+    async def test_local_runtime_allows_rewrite_after_first_rejected_submit_report(self) -> None:
+        rejected = self._rejected_report()
+        report = make_valid_report().strip()
 
         async def agent(tools: list[object], _inputs: dict[str, object]) -> object:
             await call_fake_tool(tools, "search_pubmed", query="cardiac surgery ESPB PCA pain", max_results=3)
             await call_fake_tool(tools, "get_studies", context="clinical")
             await call_fake_tool(tools, "finalize_ranking", ranked_indices=[1], rationale="Most relevant RCT.")
+            await call_fake_tool(tools, "submit_report", report_markdown=rejected)
             await call_fake_tool(tools, "submit_report", report_markdown=report)
+            await asyncio.sleep(1)
+            return {"messages": []}
+
+        events = await self.collect_events(agent)
+        final = [event for event in events if event.event_type == EventType.RUN_COMPLETED][-1]
+
+        self.assertFalse(final.extra["had_error"])
+        self.assertEqual(final.extra["report_source"], "submitted_report")
+        self.assertEqual(final.report_markdown, report)
+
+    async def test_local_runtime_recovers_after_repeated_rejected_submit_report(self) -> None:
+        rejected = self._rejected_report()
+
+        async def agent(tools: list[object], _inputs: dict[str, object]) -> object:
+            await call_fake_tool(tools, "search_pubmed", query="cardiac surgery ESPB PCA pain", max_results=3)
+            await call_fake_tool(tools, "get_studies", context="clinical")
+            await call_fake_tool(tools, "finalize_ranking", ranked_indices=[1], rationale="Most relevant RCT.")
+            await call_fake_tool(tools, "submit_report", report_markdown=rejected)
+            await call_fake_tool(tools, "submit_report", report_markdown=rejected)
             await asyncio.sleep(1)
             return {"messages": []}
 
@@ -277,12 +307,92 @@ class LocalRuntimeTests(unittest.IsolatedAsyncioTestCase):
         ]
         final = [event for event in events if event.event_type == EventType.RUN_COMPLETED][-1]
 
-        self.assertEqual(len(submit_results), 1)
-        self.assertIn("error", submit_results[0].extra["full_tool_output"])
+        self.assertEqual(len(submit_results), 2)
+        self.assertIn("error", submit_results[-1].extra["full_tool_output"])
         self.assertFalse(final.extra["had_error"])
         self.assertEqual(final.extra["report_source"], "recovered_agentic_state")
         self.assertIn("## 4. Results/Findings", final.report_markdown or "")
         self.assertIn("Erector spinae plane block", final.report_markdown or "")
+
+    async def test_local_runtime_never_presents_uncited_answer_without_search(self) -> None:
+        class FakeAIMessage:
+            content = "ESPB clearly reduces pain after cardiac surgery. " * 60
+
+        async def agent(_tools: list[object], _inputs: dict[str, object]) -> object:
+            return {"messages": [FakeAIMessage()]}
+
+        events = await self.collect_events(agent)
+        fallback = [event for event in events if (event.extra or {}).get("fallback_reason")]
+        final = [event for event in events if event.event_type == EventType.RUN_COMPLETED][-1]
+
+        self.assertTrue(fallback)
+        self.assertIn("without calling any research tools", fallback[0].extra["fallback_reason"])
+        self.assertNotEqual(final.extra.get("report_source"), "agent_result")
+        self.assertNotIn("ESPB clearly reduces pain", final.report_markdown or "")
+
+    async def test_local_runtime_falls_back_when_model_never_starts_tool_use(self) -> None:
+        async def agent(_tools: list[object], _inputs: dict[str, object]) -> object:
+            await asyncio.sleep(5)
+            return {"messages": []}
+
+        with patch.object(AlwaysAvailableLocalRuntime, "first_tool_timeout_seconds", 0.05):
+            events = await self.collect_events(agent)
+        fallback = [event for event in events if (event.extra or {}).get("fallback_reason")]
+
+        self.assertTrue(fallback)
+        self.assertIn("did not begin tool use", fallback[0].extra["fallback_reason"])
+
+    async def test_local_runtime_passes_recursion_limit_and_request_timeout(self) -> None:
+        report = make_valid_report().strip()
+
+        async def agent(tools: list[object], _inputs: dict[str, object]) -> object:
+            await call_fake_tool(tools, "search_pubmed", query="cardiac surgery ESPB PCA pain", max_results=3)
+            await call_fake_tool(tools, "get_studies", context="clinical")
+            await call_fake_tool(tools, "finalize_ranking", ranked_indices=[1], rationale="Most relevant RCT.")
+            await call_fake_tool(tools, "submit_report", report_markdown=report)
+            return {"messages": []}
+
+        await self.collect_events(agent)
+
+        self.assertEqual(invocations[-1]["config"], {"recursion_limit": LangChainLocalRuntime.recursion_limit})
+        self.assertEqual(chat_models[-1].kwargs["timeout"], LangChainLocalRuntime.request_timeout_seconds)  # type: ignore[attr-defined]
+        self.assertEqual(chat_models[-1].kwargs["max_retries"], LangChainLocalRuntime.max_retries)  # type: ignore[attr-defined]
+
+    async def test_submitted_report_has_reasoning_blocks_removed(self) -> None:
+        report = make_valid_report().strip()
+
+        async def agent(tools: list[object], _inputs: dict[str, object]) -> object:
+            await call_fake_tool(tools, "search_pubmed", query="cardiac surgery ESPB PCA pain", max_results=3)
+            await call_fake_tool(tools, "get_studies", context="clinical")
+            await call_fake_tool(tools, "finalize_ranking", ranked_indices=[1], rationale="Most relevant RCT.")
+            await call_fake_tool(
+                tools, "submit_report", report_markdown=f"<think>Plan the sections first.</think>\n{report}"
+            )
+            return {"messages": []}
+
+        events = await self.collect_events(agent)
+        final = [event for event in events if event.event_type == EventType.RUN_COMPLETED][-1]
+
+        self.assertEqual(final.extra["report_source"], "submitted_report")
+        self.assertNotIn("<think>", final.report_markdown or "")
+        self.assertNotIn("Plan the sections first", final.report_markdown or "")
+
+
+class ReasoningAndTranslationHelperTests(unittest.TestCase):
+    def test_strip_reasoning_blocks(self) -> None:
+        from medical_deep_research.agentic_tools import strip_reasoning_blocks
+
+        self.assertEqual(strip_reasoning_blocks("<think>internal</think>\n# Report"), "# Report")
+        self.assertEqual(strip_reasoning_blocks("dangling reasoning</think># Report"), "# Report")
+        self.assertEqual(strip_reasoning_blocks("# Report without reasoning"), "# Report without reasoning")
+
+    def test_translation_looks_complete_rejects_truncated_translation(self) -> None:
+        from medical_deep_research.agentic_tools import translation_looks_complete
+
+        original = make_valid_report()
+        truncated = original.split("## 4.")[0] + "x" * 300
+        self.assertFalse(translation_looks_complete(original, truncated))
+        self.assertTrue(translation_looks_complete(original, original))
 
 
 class NewToolBehaviorTests(unittest.IsolatedAsyncioTestCase):

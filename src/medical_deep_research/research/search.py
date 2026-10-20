@@ -52,20 +52,60 @@ def is_landmark_journal(journal: str | None) -> bool:
     return any(landmark in lowered for landmark in LANDMARK_JOURNALS)
 
 
+# Publication types (NLM PubMed, Europe PMC, OpenAlex/Crossref), normalized to
+# lowercase with hyphens/underscores as spaces.
+_PT_LEVEL_I = {"systematic review", "meta analysis", "network meta analysis"}
+_PT_LEVEL_II = {"randomized controlled trial", "equivalence trial", "pragmatic clinical trial"}
+_PT_LEVEL_III = {
+    "observational study",
+    "controlled clinical trial",
+    "clinical trial",
+    "clinical trial phase i",
+    "clinical trial phase ii",
+    "clinical trial phase iii",
+    "clinical trial phase iv",
+    "multicenter study",
+}
+_PT_LEVEL_IV = {"case reports"}
+# Narrative reviews and opinion pieces sit at the bottom of the hierarchy; only
+# systematic reviews/meta-analyses are Level I.
+_PT_LEVEL_V = {"review", "review article", "editorial", "comment", "letter", "expert opinion"}
+# Guidelines are appraised separately and are not placed on the Level I–V scale.
+_PT_GUIDELINE = {"practice guideline", "guideline", "consensus development conference"}
+
+
+def _normalize_publication_type(value: str) -> str:
+    return re.sub(r"[\s_,-]+", " ", value.lower()).strip()
+
+
 def infer_evidence_level(title: str | None, publication_types: list[str] | None = None) -> str | None:
     lowered = (title or "").lower()
-    types = [item.lower() for item in (publication_types or [])]
-    if re.search(r"systematic\s*review|meta[\s-]?analysis", lowered):
+    types = {_normalize_publication_type(item) for item in (publication_types or []) if item}
+    if re.search(r"systematic\s*review|meta[\s-]?analys[ie]s", lowered) or types & _PT_LEVEL_I:
         return "Level I"
-    if "review" in types:
-        return "Level I"
-    if re.search(r"randomized|randomised|rct\b|clinical trial", lowered):
+    if types & _PT_GUIDELINE:
+        return None
+    if types & _PT_LEVEL_II or re.search(r"\brandomi[sz]ed|\brct\b", lowered):
         return "Level II"
-    if re.search(r"cohort|case[\s-]?control|prospective|retrospective", lowered):
+    if types & _PT_LEVEL_III or re.search(
+        r"cohort|case[\s-]?control|prospective|retrospective|clinical trial|non[\s-]?randomi[sz]ed", lowered
+    ):
         return "Level III"
-    if re.search(r"case\s*(series|report)|cross-sectional", lowered):
+    if types & _PT_LEVEL_IV or re.search(r"case\s*(series|report)|cross[\s-]?sectional", lowered):
         return "Level IV"
+    if types & _PT_LEVEL_V or re.search(r"\breview\b", lowered):
+        return "Level V"
     return None
+
+
+_COCHRANE_NOT_A_REVIEW_RE = re.compile(r"\bwithdrawn\b|\bprotocol\b", re.IGNORECASE)
+
+
+def cochrane_evidence_level(title: str | None) -> str | None:
+    """Cochrane reviews are Level I; withdrawn reviews and protocols are not."""
+    if _COCHRANE_NOT_A_REVIEW_RE.search(title or ""):
+        return None
+    return "Level I"
 
 
 def reconstruct_abstract(inverted_index: dict[str, list[int]] | None) -> str | None:
@@ -577,7 +617,7 @@ async def search_cochrane(
     for study in result.studies:
         study.source = "cochrane"
         study.sources = ["cochrane"]
-        study.evidence_level = "Level I"
+        study.evidence_level = cochrane_evidence_level(study.title)
     return result
 
 

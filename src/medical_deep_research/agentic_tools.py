@@ -673,26 +673,50 @@ async def tool_finalize_ranking(request: RunRequest, bridge: AgenticEventBridge,
     if not pre_scored:
         return {"error": "Call get_studies first."}
     idx_map = {s.reference_number: s for s in pre_scored}
+    requested = {int(idx) for idx in ranked_indices if int(idx) in idx_map}
+    screened = bridge.screening is not None
+    unscreened_extras = [s for s in pre_scored if s.reference_number not in requested]
+    note = ""
+    if not screened and unscreened_extras:
+        # get_studies (e.g. after snowballing) resets screening; unscreened studies
+        # must not be appended to the report pool. Ask once, then keep only the
+        # explicitly ranked studies so a weak model cannot loop here.
+        if not bridge._intermediate.get("finalize_unscreened_refusal"):
+            bridge._intermediate["finalize_unscreened_refusal"] = True
+            return {
+                "error": (
+                    "The current study pool has not been screened (get_studies resets screening). "
+                    "Call screen_studies first, then call finalize_ranking again."
+                ),
+                "unscreened_count": len(unscreened_extras),
+            }
+        note = "No screening was performed on this pool; only the explicitly ranked studies were kept."
     ranked: list[ScoredStudy] = []
     seen: set[int] = set()
-    for i, idx in enumerate(ranked_indices, start=1):
+    for idx in ranked_indices:
         idx = int(idx)
         if idx in idx_map and idx not in seen:
             study = idx_map[idx].model_copy(deep=True)
-            study.reference_number = i
-            ranked.append(study)
-            seen.add(idx)
-    for s in pre_scored:
-        if s.reference_number not in seen:
-            study = s.model_copy(deep=True)
             study.reference_number = len(ranked) + 1
             ranked.append(study)
+            seen.add(idx)
+    if screened:
+        for s in pre_scored:
+            if s.reference_number not in seen:
+                study = s.model_copy(deep=True)
+                study.reference_number = len(ranked) + 1
+                ranked.append(study)
+    if not ranked:
+        return {"error": "None of the ranked_indices match studies in the current pool. Use indices from get_studies/browse_studies."}
     bridge.ranked_studies = ranked
-    return {
+    result: dict[str, Any] = {
         "status": "ok", "total_ranked": len(ranked),
         "top_5": [{"rank": s.reference_number, "title": s.title} for s in ranked[:5]],
         "rationale": rationale,
     }
+    if note:
+        result["note"] = note
+    return result
 
 
 _GRADE_LEVELS = {"high": "High", "moderate": "Moderate", "low": "Low", "very low": "Very Low"}
@@ -884,7 +908,7 @@ async def tool_verify_studies(request: RunRequest, bridge: AgenticEventBridge) -
         bridge.ranked_studies,
         api_keys=request.api_keys,
         offline_mode=request.offline_mode,
-        limit=8,
+        limit=MAX_REPORT_STUDIES,
     )
     bridge.verification = summary
     return {"verified": summary.verified_pmids, "missing": summary.missing_pmids, "markdown": render_verification_report(summary)}
@@ -1370,9 +1394,36 @@ def report_quality_issues(report_markdown: str, ranked_count: int = 0, search_co
     return issues
 
 
+_REASONING_BLOCK_RE = re.compile(r"<(think|thinking)>.*?</\1>", re.IGNORECASE | re.DOTALL)
+_DANGLING_REASONING_RE = re.compile(r"^.*?</(think|thinking)>", re.IGNORECASE | re.DOTALL)
+
+
+def strip_reasoning_blocks(text: str) -> str:
+    """Remove reasoning blocks (e.g. Qwen ``<think>…</think>``) that local servers may leave in content."""
+    cleaned = _REASONING_BLOCK_RE.sub("", text)
+    # A server that drops the opening tag leaves "reasoning…</think>answer".
+    if re.search(r"</(think|thinking)>", cleaned, re.IGNORECASE):
+        cleaned = _DANGLING_REASONING_RE.sub("", cleaned, count=1)
+    return cleaned.strip()
+
+
+def _markdown_heading_count(text: str) -> int:
+    return sum(1 for line in text.splitlines() if line.lstrip().startswith("#"))
+
+
+def translation_looks_complete(original: str, translated: str) -> bool:
+    """A translation that dropped sections (e.g. truncated output) must not replace the report."""
+    if len(translated.strip()) <= 200:
+        return False
+    original_headings = _markdown_heading_count(original)
+    if original_headings == 0:
+        return True
+    return _markdown_heading_count(translated) >= max(1, int(original_headings * 0.8))
+
+
 async def tool_submit_report(request: RunRequest, bridge: AgenticEventBridge, report_markdown: str) -> dict[str, Any]:
     """Store the agent-written final report."""
-    report_markdown = str(report_markdown).strip()
+    report_markdown = strip_reasoning_blocks(str(report_markdown))
     if not report_markdown:
         return {"error": "Report is empty. Write the full report and submit again."}
 
@@ -1460,10 +1511,12 @@ async def tool_translate_report(
 
     try:
         _log.info("Calling LLM for translation: provider=%s model=%s", provider, model)
-        translated = await _call_llm_for_translation(
+        translated = strip_reasoning_blocks(await _call_llm_for_translation(
             provider, model, api_keys, translation_prompt, report_markdown,
-        )
+        ))
         _log.info("Translation returned %d chars", len(translated))
+        if not translation_looks_complete(report_markdown, translated):
+            return {"error": "Translation looks incomplete (missing sections); keeping the original report."}
         bridge._intermediate["submitted_report"] = translated
         bridge.set_result(translated)
         return {"status": "ok", "length": len(translated)}
