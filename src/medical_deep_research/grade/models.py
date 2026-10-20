@@ -126,3 +126,9 @@ class GradeStage1Result(BaseModel):
     review_map: ReviewMap = Field(default_factory=ReviewMap)
     extractions: list[StudyExtraction] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+
+
+class GradeResult(GradeStage1Result):
+    """Stage 1 plus the per-outcome assessment (bodies of evidence, domains, certainty in modes A and B)."""
+
+    profiles: list[dict] = Field(default_factory=list)

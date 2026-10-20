@@ -64,6 +64,7 @@ class ArtifactType(StrEnum):
     GRADE_OUTCOMES = "grade_outcomes"
     GRADE_REVIEW_MAP = "grade_review_map"
     GRADE_EXTRACTION = "grade_extraction"
+    GRADE_PROFILE = "grade_profile"
 
 
 class ApprovalStatus(StrEnum):

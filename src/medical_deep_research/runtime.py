@@ -5608,8 +5608,8 @@ class LangChainLocalRuntime(NativeSDKRuntime):
     async def _grade_stage1_events(
         self, request: RunRequest, bridge: AgenticEventBridge
     ) -> AsyncIterator[RuntimeEventPayload]:
-        """Run the GRADE graph (stage 1) on the ranked studies and emit its artifacts."""
-        from .grade.graph import run_stage1
+        """Run the GRADE graph (stages 1-2) on the ranked studies and emit its artifacts."""
+        from .grade.graph import run_grade
         from .research.snowball import snowball
 
         progress_queue: asyncio.Queue[str | None] = asyncio.Queue()
@@ -5636,7 +5636,7 @@ class LangChainLocalRuntime(NativeSDKRuntime):
 
         async def run() -> Any:
             try:
-                return await run_stage1(
+                return await run_grade(
                     request, list(bridge.ranked_studies), structured_call, fetch_references, fulltext_for, progress
                 )
             finally:
@@ -5660,6 +5660,7 @@ class LangChainLocalRuntime(NativeSDKRuntime):
             (ArtifactType.GRADE_REVIEW_MAP, "GRADE review map", result.review_map.model_dump(mode="json")),
             (ArtifactType.GRADE_EXTRACTION, "GRADE extraction",
              {"extractions": [e.model_dump(mode="json") for e in result.extractions], "notes": result.notes}),
+            (ArtifactType.GRADE_PROFILE, "GRADE evidence profile", {"profiles": result.profiles}),
         ):
             yield _ev(bridge.progress, EventType.ARTIFACT_CREATED, "appraising", f"Saved {name}",
                       artifact_type=artifact_type, artifact_name=name, artifact_json=payload)
