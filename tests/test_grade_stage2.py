@@ -30,7 +30,7 @@ from medical_deep_research.grade.models import (
     StudyExtraction,
     StudyOutcomeData,
 )
-from medical_deep_research.grade.synthesis import EvidenceBody, build_bodies, orient, pool
+from medical_deep_research.grade.synthesis import EvidenceBody, build_bodies, orient, pool, rr_from_counts
 from medical_deep_research.models import RunRequest
 
 SBP = OutcomeSpec(id="o1", name="PA sistólica", kind="continuous", desirable_direction="decrease")
@@ -77,6 +77,29 @@ class OrientationAndPoolingTests(unittest.TestCase):
         self.assertEqual(rct.pooled.k, 2)
         self.assertTrue(any("SMD" in note for note in rct.not_pooled))
         self.assertEqual(next(b for b in bodies if b.design == "nrs").refs, [3])
+
+
+class CalibrationTests(unittest.TestCase):
+    def test_rr_from_counts_when_no_effect_reported(self) -> None:
+        item = StudyOutcomeData(study_ref=9, outcome_id="o2", reported=True, design=StudyDesign.RCT,
+                                events_intervention=60, n_intervention=100, events_control=40, n_control=100)
+        rr, lo, hi = rr_from_counts(item)
+        self.assertAlmostEqual(rr, 1.5)
+        self.assertLess(lo, 1.5)
+        self.assertGreater(hi, 1.5)
+        body = build_bodies([CONTROL], [StudyExtraction(study_ref=9, items=[item])])[0]
+        self.assertEqual(body.pooled.measure, "RR")
+        self.assertTrue(body.derived)
+
+    def test_unknown_participants_do_not_trigger_ois_downgrade(self) -> None:
+        known = _item(1, -3, -5, -1, n=300)
+        unknown = _item(2, -4, -6, -2, n=0)
+        unknown.n_intervention = unknown.n_control = None
+        body = _body([known, unknown])
+        self.assertFalse(body.participants_complete)
+        judgement = imprecision(body, SBP)
+        self.assertEqual(judgement.rating, 0)
+        self.assertIn("could not be verified", judgement.rationale)
 
 
 class DomainRuleTests(unittest.TestCase):
@@ -166,3 +189,17 @@ class AssessmentTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IndirectnessCapTests(unittest.IsolatedAsyncioTestCase):
+    async def test_intervention_only_very_serious_is_capped_at_minus_one(self) -> None:
+        request = RunRequest(run_id="r", query="q", query_type="pico", mode="detailed", provider="local", model="m")
+        bodies = build_bodies([SBP], [StudyExtraction(study_ref=1, items=[_item(1, -3, -5, -1, n=1000)])])
+
+        async def structured_call(_task: str, _i: str, _p: str, model: type) -> Any:
+            if model is IndirectnessOutput:
+                return IndirectnessOutput(intervention=ElementJudgement(concern="very serious"), rating=-2)
+            return model()
+
+        body = (await assess_outcomes(structured_call, request, [SBP], bodies))[0].bodies[0]
+        self.assertEqual(next(d for d in body.domains if d.domain == "indirectness").rating, -1)

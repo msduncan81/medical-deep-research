@@ -107,12 +107,13 @@ def _ois_binary(control_rate: float, rrr: float = 0.25, increase: bool = False) 
 def imprecision(body: EvidenceBody, outcome: OutcomeSpec) -> DomainJudgement:
     pooled = body.pooled
     if pooled is None:
-        return DomainJudgement(domain="imprecision", rating=-2,
-                               rationale="no effect estimate with a confidence interval")
+        return DomainJudgement(domain="imprecision", rating=-2, metrics={"quantitative": "no"},
+                               rationale="no quantitative estimate could be combined (narrative evidence only)")
     measure, est, lo, hi = pooled.measure, pooled.estimate, pooled.ci_low, pooled.ci_high
-    n = body.participants
+    n = body.participants if body.participants_complete else None
     metrics: dict[str, float | int | str | None] = {"estimate": round(est, 4), "ci_low": round(lo, 4),
-                                                    "ci_high": round(hi, 4), "participants": n}
+                                                    "ci_high": round(hi, 4), "participants": body.participants,
+                                                    "participants_complete": str(body.participants_complete)}
     use_mid = outcome.target == CertaintyTarget.MID and outcome.mid_value and measure not in RATIO_MEASURES
     if use_mid:
         mid = abs(float(outcome.mid_value or 0))
@@ -148,14 +149,19 @@ def imprecision(body: EvidenceBody, outcome: OutcomeSpec) -> DomainJudgement:
         if rrr > 0.3 and body.control_event_rate:
             ois = _ois_binary(body.control_event_rate, increase=outcome.desirable_direction == "increase")
             metrics["ois"] = ois
-            if n is not None and n < ois:
+            if n is None:
+                return DomainJudgement(domain="imprecision", metrics=metrics,
+                                       rationale=f"CI excludes the threshold; OIS ({ois}) could not be verified "
+                                                 "(participants missing for some studies)")
+            if n < ois:
                 return DomainJudgement(domain="imprecision", rating=-1, metrics=metrics,
                                        rationale=f"large relative effect from {n} participants, below the OIS ({ois})")
         return DomainJudgement(domain="imprecision", rationale="CI excludes the threshold; information size adequate",
                                metrics=metrics)
     if n is None:
-        return DomainJudgement(domain="imprecision", rating=-1, metrics=metrics,
-                               rationale="CI excludes the threshold but the number of participants is unknown")
+        return DomainJudgement(domain="imprecision", metrics=metrics,
+                               rationale="CI excludes the threshold; OIS could not be verified "
+                                         "(participants missing for some studies)")
     if n < 0.3 * CONTINUOUS_OIS_TOTAL:
         return DomainJudgement(domain="imprecision", rating=-2, metrics=metrics,
                                rationale=f"{n} participants, under 30% of the OIS ({CONTINUOUS_OIS_TOTAL})")

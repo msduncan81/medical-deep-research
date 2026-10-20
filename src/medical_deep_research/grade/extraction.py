@@ -37,11 +37,18 @@ Rules:
   participants_in_estimate, heterogeneity_i2 if reported, review_grade if the review reports a GRADE
   certainty for it, and is_network_meta_analysis=true for a network meta-analysis.
 - population/intervention/comparator/outcome_definition/follow_up: what the study actually did, briefly.
-- risk_of_bias (primary studies, per Core GRADE): "low" or "high" based on randomisation and allocation
-  concealment, blinding where it matters for this outcome, missing outcome data and selective reporting;
+- risk_of_bias is judged PER OUTCOME (Core GRADE 4): "high" only when a limitation is likely to bias THIS
+  outcome's estimate. Consider randomisation and allocation concealment, missing outcome data (amount and
+  imbalance) and selective reporting. Lack of blinding matters only for outcomes that unblinded people
+  can influence (subjective, patient-reported or assessor-judged outcomes). Open-label trials of
+  self-management are usually "low" for objective outcomes such as automated blood-pressure readings,
+  laboratory values, hospitalisation or death, if randomisation and follow-up are adequate.
   "unclear" when the text does not allow a judgement (typical for abstracts). Explain in
-  risk_of_bias_rationale. For a systematic review, judge the risk of bias of its included trials as the
-  review reports it.
+  risk_of_bias_rationale, naming the outcome.
+- For a systematic review: summarise the risk of bias of ITS INCLUDED TRIALS FOR THIS OUTCOME as the review
+  reports it: "high" only if most of the weight comes from trials at high risk for this outcome, or the
+  review itself rated the outcome down for risk of bias; a "high" rating in a single domain (e.g.
+  performance bias in unblindable trials) is not enough.
 - source_text: "fulltext" if the passage came from the full text section, else "abstract".
 """
 

@@ -43,6 +43,8 @@ class EvidenceBody(BaseModel):
     participants: int | None = None
     control_event_rate: float | None = None
     not_pooled: list[str] = Field(default_factory=list)
+    derived: list[str] = Field(default_factory=list)
+    participants_complete: bool = False
     from_review: bool = False
 
     @property
@@ -52,6 +54,18 @@ class EvidenceBody(BaseModel):
 
 def _benefit_is_lower(outcome: OutcomeSpec) -> bool:
     return outcome.desirable_direction.strip().lower() != "increase"
+
+
+def rr_from_counts(item: StudyOutcomeData) -> tuple[float, float, float] | None:
+    """Risk ratio (intervention/control) with 95% CI from 2x2 counts; 0.5 continuity correction for zeros."""
+    a, n1, c, n2 = item.events_intervention, item.n_intervention, item.events_control, item.n_control
+    if None in (a, n1, c, n2) or not n1 or not n2 or a > n1 or c > n2:  # type: ignore[operator]
+        return None
+    if a in (0, n1) or c in (0, n2):
+        a, c, n1, n2 = a + 0.5, c + 0.5, n1 + 1, n2 + 1  # type: ignore[operator]
+    rr = (a / n1) / (c / n2)  # type: ignore[operator]
+    se = math.sqrt(1 / a - 1 / n1 + 1 / c - 1 / n2)  # type: ignore[operator]
+    return rr, math.exp(math.log(rr) - Z95 * se), math.exp(math.log(rr) + Z95 * se)
 
 
 def orient(item: StudyOutcomeData, outcome: OutcomeSpec) -> tuple[float, float, float] | None:
@@ -150,20 +164,29 @@ def build_bodies(outcomes: list[OutcomeSpec], extractions: list[StudyExtraction]
                 continue
             body = EvidenceBody(outcome_id=outcome.id, design=group, items=items)
             oriented: dict[str, list[tuple[int, float, float, float]]] = defaultdict(list)
+            pooled_refs: set[int] = set()
             for item in items:
                 result = orient(item, outcome)
+                measure = item.effect_measure or "?"
+                if result is None and (counts := rr_from_counts(item)) is not None:
+                    result, measure = counts, "RR"
+                    body.derived.append(f"[{item.study_ref}] RR calculated from events per group")
                 if result is None:
                     body.not_pooled.append(f"[{item.study_ref}] no usable effect with CI")
                     continue
-                oriented[item.effect_measure or "?"].append((item.study_ref, *result))
+                oriented[measure].append((item.study_ref, *result))
             if oriented:
                 measure = max(oriented, key=lambda m: (len(oriented[m]), m in DIFFERENCE_MEASURES))
                 body.pooled = pool(measure, oriented[measure])
+                pooled_refs = {row[0] for row in oriented[measure]}
                 for other, rows in oriented.items():
                     if other != measure:
                         body.not_pooled.extend(f"[{r[0]}] reported {other}, not combined with {measure}" for r in rows)
-            counts = [p for i in items if (p := _participants(i))]
-            body.participants = sum(counts) if counts else None
+            # Information size counts only the estimates that were combined; unknown n -> unknown total.
+            in_pool = [i for i in items if i.study_ref in pooled_refs]
+            sizes = [_participants(i) for i in in_pool]
+            body.participants = sum(x for x in sizes if x) or None
+            body.participants_complete = bool(in_pool) and all(sizes)
             ev_c = sum(i.events_control or 0 for i in items if i.events_control is not None and i.n_control)
             n_c = sum(i.n_control or 0 for i in items if i.events_control is not None and i.n_control)
             body.control_event_rate = round(ev_c / n_c, 4) if n_c else None

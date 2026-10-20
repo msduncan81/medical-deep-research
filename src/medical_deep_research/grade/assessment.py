@@ -118,15 +118,22 @@ the effect differs substantially because of it; the more likely, the greater the
 - Often a concern: surrogate outcomes when the target is patient-important, poorly described or different
   interventions (e.g. a broader multicomponent programme), suboptimal comparators, outdated technology.
 - Indirect harms evidence from other conditions: at most one level.
+- VARIATION BETWEEN STUDIES IS NOT INDIRECTNESS. If some studies match the target and others differ (e.g.
+  self-monitoring alone vs self-monitoring plus self-titration), that is an inconsistency/subgroup question,
+  rated in the inconsistency domain. Rate indirectness only when most of the weight of the evidence
+  differs from the target question in a way likely to change the effect.
+- Rating down twice for indirectness is rare (e.g. evidence only from a different population or a surrogate
+  far from the target outcome).
 Return concern per element ("none", "serious", "very serious") and an overall rating: 0, -1 or -2.
 Write rationales in the report language, briefly."""
 
 ADJUSTMENT_INSTRUCTIONS = """\
 You review a GRADE certainty computed by summing domain ratings for one body of evidence. GRADE's overall
 judgement is holistic: you may move the computed certainty by at most one level (-1, 0 or +1) when the sum
-misrepresents the evidence, e.g. the same problem was counted in two domains (imprecision and
-inconsistency), or several borderline concerns together are serious. Default is 0. Explain briefly in the
-report language."""
+misrepresents the evidence. Check explicitly for double counting: the same problem rated in two domains,
+e.g. differences in interventions across studies rated both as inconsistency and as indirectness, or a
+wide CI caused by heterogeneity rated both as inconsistency and imprecision. Several borderline concerns
+together may justify -1. Default is 0. Explain briefly in the report language."""
 
 HOLISTIC_INSTRUCTIONS = """\
 You rate the GRADE certainty of evidence for ONE outcome and ONE body of evidence (Core GRADE), using the
@@ -212,8 +219,12 @@ async def assess_body(
         IndirectnessOutput, flags,
     )
     concerns = [indirect.population, indirect.intervention, indirect.comparator, indirect.outcome]
-    worst = 2 if any(c.concern == "very serious" for c in concerns) else 1 if any(c.concern == "serious" for c in concerns) else 0
-    indirect_rating = _clamp(indirect.rating, -worst, 0)  # the overall rating cannot exceed the element concerns
+    serious_elements = sum(c.concern in ("serious", "very serious") for c in concerns)
+    very_serious_po = any(c.concern == "very serious" for c in (indirect.population, indirect.outcome))
+    worst = 2 if (very_serious_po or serious_elements >= 2) else 1 if serious_elements else 0
+    # The overall rating cannot exceed the element concerns; -2 needs a very serious population/outcome
+    # mismatch or concerns in at least two elements (rating down twice is rare — Core GRADE 5).
+    indirect_rating = _clamp(indirect.rating, -worst, 0)
     indirectness = DomainJudgement(
         domain="indirectness", rating=indirect_rating, source="model",
         rationale=indirect.rationale or "; ".join(f"{n}: {c.concern}" for n, c in
