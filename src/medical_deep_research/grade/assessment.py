@@ -76,6 +76,7 @@ class BodyAssessment(BaseModel):
     start: int
     refs: list[int]
     participants: int | None = None
+    control_event_rate: float | None = None
     estimate: dict[str, Any] | None = None
     domains: list[DomainJudgement] = Field(default_factory=list)
     certainty_computed: int = 1
@@ -279,6 +280,7 @@ async def assess_body(
     pooled = body.pooled
     return BodyAssessment(
         outcome_id=outcome.id, design=body.design, start=start, refs=body.refs, participants=body.participants,
+        control_event_rate=body.control_event_rate,
         estimate=pooled.model_dump(exclude={"study_estimates"}) if pooled else None,
         domains=domains, certainty_computed=computed, certainty_a=certainty_a, adjustment_a=adjustment,
         certainty_b=certainty_b, holistic_b=holistic, coherence_flags=flags, not_pooled=body.not_pooled,

@@ -5601,6 +5601,13 @@ class LangChainLocalRuntime(NativeSDKRuntime):
         if grade_pipeline_enabled() and bridge.ranked_studies:
             async for evt in self._grade_stage1_events(request, bridge):
                 yield evt
+            grade_report = bridge._intermediate.get("grade_report")
+            if isinstance(grade_report, str) and grade_report.strip():
+                yield _ev(bridge.progress, EventType.ARTIFACT_CREATED, "synthesizing",
+                          "Saved the agent's report before the GRADE graph",
+                          artifact_type=ArtifactType.FINAL_REPORT, artifact_name="Agent report (before GRADE)",
+                          artifact_text=final_report)
+                final_report, report_source = grade_report, "grade_graph"
 
         for event in _agentic_final_events(self, request, final_report, bridge, report_source=report_source):
             yield event
@@ -5653,6 +5660,19 @@ class LangChainLocalRuntime(NativeSDKRuntime):
                       f"GRADE stage 1 failed: {_format_exception(exc)}", agent_name="GRADE graph")
             return
         bridge._intermediate["grade_stage1"] = result.model_dump(mode="json")
+        yield _ev(bridge.progress, EventType.AGENT_STARTED, "synthesizing",
+                  "GRADE · report: writing the report by outcome", agent_name="GRADE graph")
+        try:
+            from .grade.report import build_grade_report, report_issues
+
+            report, report_notes = await build_grade_report(
+                structured_call, result, request, list(bridge.ranked_studies)
+            )
+            issues = report_issues(report, result, request)
+            bridge._intermediate["grade_report"] = report
+            bridge._intermediate["grade_report_notes"] = [*report_notes, *issues]
+        except Exception as exc:  # noqa: BLE001 - keep the agent's report if the GRADE report fails
+            _log.warning("GRADE report failed: %s", exc)
         for artifact_type, name, payload in (
             (ArtifactType.GRADE_OUTCOMES, "GRADE outcomes",
              {"outcomes": [o.model_dump(mode="json") for o in result.outcomes],
