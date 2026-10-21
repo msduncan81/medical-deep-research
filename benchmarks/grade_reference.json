@@ -1,0 +1,132 @@
+{
+  "description": "Reference set for the GRADE graph: certainty per outcome from recent Cochrane Summary of Findings tables (main comparison). Values verified from PubMed/PMC abstracts and SoF tables on 2026-10-21. Each review is excluded from the searches of its own question (cd/pmid/doi).",
+  "questions": [
+    {
+      "id": "q1_ecig",
+      "title": "Cigarro eletrônico com nicotina vs terapia de reposição de nicotina para cessação do tabagismo",
+      "cochrane": {
+        "citation": "Lindson N, et al. Electronic cigarettes for smoking cessation. Cochrane Database Syst Rev 2025;(11):CD010216 (pub10).",
+        "cd": "CD010216", "pmid": "41212103", "doi": "10.1002/14651858.CD010216.pub10"
+      },
+      "pico": {
+        "population": "adults who smoke tobacco",
+        "intervention": "nicotine electronic cigarettes",
+        "comparator": "nicotine replacement therapy"
+      },
+      "comparison": {
+        "short_label": "o cigarro eletrônico com nicotina",
+        "intervention": "Nicotine e-cigarettes (any device) offered to help people stop smoking",
+        "comparator": "Nicotine replacement therapy (any form)"
+      },
+      "outcomes": [
+        {"id": "o1", "name": "Abstinência do tabagismo por 6 meses ou mais", "kind": "binary", "desirable_direction": "increase", "importance_score": 9, "cochrane_certainty": "high", "cochrane_effect": "RR 1.51 (1.25 to 1.82) SoF; abstract RR 1.55 (1.28 to 1.88); 9 RCTs, 2703"},
+        {"id": "o2", "name": "Eventos adversos", "kind": "binary", "desirable_direction": "decrease", "importance_score": 6, "cochrane_certainty": "moderate", "cochrane_effect": "RR 1.00 (0.73 to 1.37); 7 RCTs, 2241; imprecision"},
+        {"id": "o3", "name": "Eventos adversos graves", "kind": "binary", "desirable_direction": "decrease", "importance_score": 8, "cochrane_certainty": "low", "cochrane_effect": "RR 1.22 (0.73 to 2.03); 8 RCTs, 2950; imprecision x2"}
+      ]
+    },
+    {
+      "id": "q2_htn_elderly",
+      "title": "Tratamento anti-hipertensivo vs placebo em adultos com 60 anos ou mais",
+      "cochrane": {
+        "citation": "Musini VM, et al. Pharmacotherapy for hypertension in adults 60 years or older. Cochrane Database Syst Rev 2025;(10):CD000028 (pub4).",
+        "cd": "CD000028", "pmid": "41065416", "doi": "10.1002/14651858.CD000028.pub4"
+      },
+      "pico": {
+        "population": "adults 60 years or older with hypertension",
+        "intervention": "antihypertensive drug therapy",
+        "comparator": "placebo or no treatment"
+      },
+      "comparison": {
+        "short_label": "o tratamento anti-hipertensivo",
+        "intervention": "Antihypertensive drug therapy (any class or combination)",
+        "comparator": "Placebo or no treatment"
+      },
+      "outcomes": [
+        {"id": "o1", "name": "Mortalidade por todas as causas", "kind": "binary", "desirable_direction": "decrease", "importance_score": 9, "cochrane_certainty": "high", "cochrane_effect": "RR 0.91 (0.85 to 0.97); 13 RCTs, 25932"},
+        {"id": "o2", "name": "Mortalidade e morbidade cardiovascular", "kind": "binary", "desirable_direction": "decrease", "importance_score": 9, "cochrane_certainty": "moderate", "cochrane_effect": "RR 0.72 (0.68 to 0.77); 15 RCTs, 26747; incomplete outcome data, selective reporting"},
+        {"id": "o3", "name": "Mortalidade e morbidade cerebrovascular", "kind": "binary", "desirable_direction": "decrease", "importance_score": 8, "cochrane_certainty": "moderate", "cochrane_effect": "RR 0.66 (0.59 to 0.74); 13 RCTs, 26042"},
+        {"id": "o4", "name": "Mortalidade e morbidade por doença coronariana", "kind": "binary", "desirable_direction": "decrease", "importance_score": 8, "cochrane_certainty": "moderate", "cochrane_effect": "RR 0.78 (0.69 to 0.88); 11 RCTs, 24559"},
+        {"id": "o5", "name": "Abandono do tratamento por efeitos adversos", "kind": "binary", "desirable_direction": "decrease", "importance_score": 6, "cochrane_certainty": "low", "cochrane_effect": "RR 2.91 (2.56 to 3.30); 4 RCTs, 11310; reporting bias, inconsistency"}
+      ]
+    },
+    {
+      "id": "q3_otitis",
+      "title": "Antibióticos vs placebo na otite média aguda em crianças",
+      "cochrane": {
+        "citation": "Venekamp RP, et al. Antibiotics for acute otitis media in children. Cochrane Database Syst Rev 2023;(11):CD000219 (pub5).",
+        "cd": "CD000219", "pmid": "37965923", "doi": "10.1002/14651858.CD000219.pub5"
+      },
+      "pico": {
+        "population": "children with acute otitis media",
+        "intervention": "antibiotics",
+        "comparator": "placebo"
+      },
+      "comparison": {
+        "short_label": "o antibiótico",
+        "intervention": "Antibiotic treatment of acute otitis media",
+        "comparator": "Placebo"
+      },
+      "outcomes": [
+        {"id": "o1", "name": "Dor em 24 horas", "kind": "binary", "desirable_direction": "decrease", "importance_score": 8, "cochrane_certainty": "high", "cochrane_effect": "RR 0.89 (0.78 to 1.01); 5 trials, 1394"},
+        {"id": "o2", "name": "Dor em 2 a 3 dias", "kind": "binary", "desirable_direction": "decrease", "importance_score": 8, "cochrane_certainty": "high", "cochrane_effect": "RR 0.71 (0.58 to 0.88); 7 trials, 2320"},
+        {"id": "o3", "name": "Dor em 4 a 7 dias", "kind": "binary", "desirable_direction": "decrease", "importance_score": 7, "cochrane_certainty": "high", "cochrane_effect": "RR 0.76 (0.50 to 1.14); 7 trials, 1264"},
+        {"id": "o4", "name": "Dor em 10 a 12 dias", "kind": "binary", "desirable_direction": "decrease", "importance_score": 6, "cochrane_certainty": "moderate", "cochrane_effect": "RR 0.33 (0.17 to 0.66); 1 trial, 278"},
+        {"id": "o5", "name": "Vômitos, diarreia ou exantema", "kind": "binary", "desirable_direction": "decrease", "importance_score": 7, "cochrane_certainty": "high", "cochrane_effect": "RR 1.38 (1.16 to 1.63); 8 trials, 2107"},
+        {"id": "o6", "name": "Timpanometria alterada em 2 a 4 semanas", "kind": "binary", "desirable_direction": "decrease", "importance_score": 5, "cochrane_certainty": "high", "cochrane_effect": "RR 0.83 (0.72 to 0.96); 7 trials, 2138"},
+        {"id": "o7", "name": "Timpanometria alterada em 3 meses", "kind": "binary", "desirable_direction": "decrease", "importance_score": 5, "cochrane_certainty": "high", "cochrane_effect": "RR 0.94 (0.66 to 1.34); 3 trials, 809"}
+      ]
+    },
+    {
+      "id": "q4_knee_oa",
+      "title": "Exercício vs controle de atenção/placebo na osteoartrite de joelho",
+      "cochrane": {
+        "citation": "Lawford BJ, et al. Exercise for osteoarthritis of the knee. Cochrane Database Syst Rev 2024;(12):CD004376 (pub4).",
+        "cd": "CD004376", "pmid": "39625083", "doi": "10.1002/14651858.CD004376.pub4"
+      },
+      "pico": {
+        "population": "people with knee osteoarthritis",
+        "intervention": "therapeutic exercise",
+        "comparator": "attention control or placebo"
+      },
+      "comparison": {
+        "short_label": "o exercício",
+        "intervention": "Therapeutic exercise programmes (any type)",
+        "comparator": "Attention control or placebo intervention"
+      },
+      "outcomes": [
+        {"id": "o1", "name": "Dor (escala 0 a 100)", "kind": "continuous", "desirable_direction": "decrease", "importance_score": 9, "target": "mid", "mid_value": 12, "mid_unit": "pontos (0-100)", "mid_source": "Minimal important difference of 12 points on a 0-100 pain scale used in OA trials", "cochrane_certainty": "low", "cochrane_effect": "MD -8.70 (-11.70 to -5.70); 28 trials, 2873"},
+        {"id": "o2", "name": "Função física (escala 0 a 100)", "kind": "continuous", "desirable_direction": "decrease", "importance_score": 8, "cochrane_certainty": "moderate", "cochrane_effect": "MD -11.27 (-15.09 to -7.64); 24 trials, 2536"},
+        {"id": "o3", "name": "Qualidade de vida (escala 0 a 100)", "kind": "continuous", "desirable_direction": "increase", "importance_score": 7, "cochrane_certainty": "moderate", "cochrane_effect": "MD 6.06 (-0.13 to 12.26); 6 trials, 454"},
+        {"id": "o4", "name": "Sucesso do tratamento", "kind": "binary", "desirable_direction": "increase", "importance_score": 7, "cochrane_certainty": "moderate", "cochrane_effect": "RR 1.46 (1.11 to 1.92); 2 trials, 364"},
+        {"id": "o5", "name": "Abandono do estudo", "kind": "binary", "desirable_direction": "decrease", "importance_score": 5, "cochrane_certainty": "moderate", "cochrane_effect": "RR 1.08 (0.92 to 1.26); 29 trials, 2907; risk of bias"},
+        {"id": "o6", "name": "Eventos adversos", "kind": "binary", "desirable_direction": "decrease", "importance_score": 6, "cochrane_certainty": "low", "cochrane_effect": "RR 2.02 (0.62 to 6.58); 11 trials, 1684; risk of bias, imprecision"}
+      ]
+    },
+    {
+      "id": "q5_zinc",
+      "title": "Zinco vs placebo na prevenção do resfriado comum",
+      "cochrane": {
+        "citation": "Nault D, et al. Zinc for prevention and treatment of the common cold. Cochrane Database Syst Rev 2024;(5):CD014914 (pub2). Prevention SoF.",
+        "cd": "CD014914", "pmid": "38719213", "doi": "10.1002/14651858.CD014914.pub2"
+      },
+      "pico": {
+        "population": "healthy children and adults (prevention of the common cold)",
+        "intervention": "oral or intranasal zinc supplementation for prevention",
+        "comparator": "placebo"
+      },
+      "comparison": {
+        "short_label": "o zinco preventivo",
+        "intervention": "Zinc given to prevent the common cold (any formulation)",
+        "comparator": "Placebo"
+      },
+      "outcomes": [
+        {"id": "o1", "name": "Desenvolver resfriado", "kind": "binary", "desirable_direction": "decrease", "importance_score": 8, "cochrane_certainty": "low", "cochrane_effect": "RR 0.93 (0.85 to 1.01); 9 RCTs, 1449; risk of bias x2"},
+        {"id": "o2", "name": "Número de resfriados", "kind": "continuous", "desirable_direction": "decrease", "importance_score": 7, "cochrane_certainty": "low", "cochrane_effect": "MD -0.90 (-1.93 to 0.12); 2 RCTs, 1284; risk of bias, inconsistency"},
+        {"id": "o3", "name": "Duração do resfriado (dias)", "kind": "continuous", "desirable_direction": "decrease", "importance_score": 7, "cochrane_certainty": "moderate", "cochrane_effect": "MD -0.63 (-1.29 to 0.04); 3 RCTs, 740; inconsistency"},
+        {"id": "o4", "name": "Gravidade dos sintomas", "kind": "continuous", "desirable_direction": "decrease", "importance_score": 6, "cochrane_certainty": "low", "cochrane_effect": "SMD 0.04 (-0.35 to 0.43); 2 RCTs, 101; risk of bias, imprecision"},
+        {"id": "o5", "name": "Eventos adversos não graves", "kind": "binary", "desirable_direction": "decrease", "importance_score": 5, "cochrane_certainty": "very low", "cochrane_effect": "RR 1.11 (0.84 to 1.47); 7 RCTs, 1517; risk of bias, imprecision x2"},
+        {"id": "o6", "name": "Eventos adversos graves", "kind": "binary", "desirable_direction": "decrease", "importance_score": 7, "cochrane_certainty": "low", "cochrane_effect": "RR 1.67 (0.78 to 3.57); 3 RCTs, 1563; imprecision x2"}
+      ]
+    }
+  ]
+}
