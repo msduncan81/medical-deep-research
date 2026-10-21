@@ -5507,11 +5507,17 @@ class LangChainLocalRuntime(NativeSDKRuntime):
         base_url = local_base_url(request.api_keys)
 
         from langchain_openai import ChatOpenAI
+        extra: dict[str, Any] = {}
+        if "deepseek" in model.lower():
+            # DeepSeek's thinking mode requires reasoning_content to be sent back on every later turn,
+            # which ChatOpenAI drops (HTTP 400 mid-run); run it with thinking off, as the native provider does.
+            extra["extra_body"] = deepseek_thinking_body()
         return ChatOpenAI(
             model=model,
             base_url=base_url,
             api_key=request.api_keys.get("local") or os.environ.get("MDR_LOCAL_API_KEY") or "local",
             default_headers=local_request_headers(base_url, request.run_id),
+            **extra,
             temperature=0.1,
             timeout=self.request_timeout_seconds,
             max_retries=self.max_retries,
