@@ -12,6 +12,7 @@ the Portuguese wording mirrors the English.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .synthesis import RATIO_MEASURES
@@ -61,6 +62,50 @@ def _in_sentence(name: str) -> str:
     return name
 
 
+_PT_RATIONALES: list[tuple[str, str]] = [
+    (r"(\d+)% of the weight comes from high risk-of-bias studies -> serious limitations",
+     r"\1% do peso vem de estudos com alto risco de viés → limitações sérias"),
+    (r"(\d+)% of the weight comes from high risk-of-bias studies; most evidence is not at high risk",
+     r"\1% do peso vem de estudos com alto risco de viés; a maior parte da evidência não tem alto risco"),
+    (r"; (\d+)% could not be judged \(limited appraisal\)", r"; \1% não pôde ser julgado (avaliação limitada)"),
+    (r"; judged from abstracts only", r"; julgado apenas pelos resumos"),
+    (r"single estimate: inconsistency not rated", r"estimativa única: inconsistência não avaliada"),
+    (r"I² (\d+)%; estimates on both sides of the null", r"I² \1%; estimativas dos dois lados do nulo"),
+    (r"I² (\d+)%; estimates on one side of the null", r"I² \1%; estimativas de um só lado do nulo"),
+    (r"; some non-overlapping CIs", r"; há intervalos sem sobreposição"),
+    (r"; no non-overlapping CIs", r"; intervalos sobrepostos"),
+    (r"no quantitative estimate could be combined \(narrative evidence only\)",
+     r"nenhuma estimativa quantitativa pôde ser combinada (evidência apenas narrativa)"),
+    (r"CI includes the null and is very wide \(upper/lower = ([\d.]+)\)",
+     r"IC inclui o nulo e é muito amplo (razão superior/inferior = \1)"),
+    (r"CI includes the null with only (\d+) participants", r"IC inclui o nulo, com apenas \1 participantes"),
+    (r"CI includes the null", r"IC inclui o nulo"),
+    (r"CI crosses both the important-benefit and important-harm thresholds \(MID ([\d.]+)\)",
+     r"IC cruza os limiares de benefício e de dano importantes (DMI \1)"),
+    (r"CI crosses the MID \(([\d.]+)\)", r"IC cruza a DMI (\1)"),
+    (r"very wide CI \(upper/lower = ([\d.]+)\)", r"IC muito amplo (razão superior/inferior = \1)"),
+    (r"large relative effect from (\d+) participants, below the OIS \((\d+)\)",
+     r"efeito relativo grande com \1 participantes, abaixo do tamanho ótimo de informação (\2)"),
+    (r"(\d+) participants, under 30% of the OIS \((\d+)\)",
+     r"\1 participantes, menos de 30% do tamanho ótimo de informação (\2)"),
+    (r"(\d+) participants, below the OIS \((\d+)\)",
+     r"\1 participantes, abaixo do tamanho ótimo de informação (\2)"),
+    (r"Egger test P = ([\d.]+) \(small-study effects suspected\)",
+     r"teste de Egger P = \1 (suspeita de efeito de estudos pequenos)"),
+    (r"very large effect", r"efeito muito grande"),
+    (r"large effect", r"efeito grande"),
+]
+
+
+def localize_rationale(text: str, language: str | None) -> str:
+    """Code-generated domain rationales are written in English; translate the known ones for PT reports."""
+    if _lang(language) != "pt":
+        return text
+    for pattern, replacement in _PT_RATIONALES:
+        text = re.sub(pattern, replacement, text)
+    return text
+
+
 def _lang(language: str | None) -> str:
     return "pt" if (language or "").lower().startswith("pt") else "en"
 
@@ -75,6 +120,11 @@ def _main_body(profile: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def informative_statement(profile: dict[str, Any], intervention: str, language: str | None) -> str:
+    text = _statement(profile, intervention, language)
+    return text[:1].upper() + text[1:]
+
+
+def _statement(profile: dict[str, Any], intervention: str, language: str | None) -> str:
     lang = _lang(language)
     t = _TEMPLATES[lang]
     outcome = profile["outcome"]
@@ -83,11 +133,11 @@ def informative_statement(profile: dict[str, Any], intervention: str, language: 
     if certainty is None:
         return t["no_evidence"].format(o=name)
     if certainty == 1:
-        return t["very_low"].format(i=intervention, o=name)
+        return t["very_low"].format(i=_in_sentence(intervention), o=name)
     body = _main_body(profile)
     estimate = (body or {}).get("estimate") or {}
     if not estimate:
-        return t["very_low"].format(i=intervention, o=name)
+        return t["very_low"].format(i=_in_sentence(intervention), o=name)
     measure, est, lo, hi = estimate["measure"], estimate["estimate"], estimate["ci_low"], estimate["ci_high"]
     null = 1.0 if measure in RATIO_MEASURES else 0.0
     if lo < null < hi:
@@ -158,12 +208,19 @@ def summary_of_findings(profiles: list[dict[str, Any]], intervention: str, langu
         estimate = body.get("estimate") or {}
         k = estimate.get("k") or len(body.get("refs") or [])
         participants = f"{body['participants']:,}".replace(",", ".") if body.get("participants") else "?"
-        relative = (f"{estimate['measure']} {_fmt(estimate['estimate'])} ({_fmt(estimate['ci_low'])} a "
-                    f"{_fmt(estimate['ci_high'])})" if estimate else "—")
         comparator_risk, intervention_risk = _absolute(body, pt)
-        if estimate and estimate.get("measure") not in RATIO_MEASURES:
-            intervention_risk = (f"{estimate['measure']} {_fmt(estimate['estimate'])} "
-                                 f"({_fmt(estimate['ci_low'])} a {_fmt(estimate['ci_high'])})")
+        if estimate and estimate.get("measure") in RATIO_MEASURES:
+            relative = (f"{estimate['measure']} {_fmt(estimate['estimate'])} ({_fmt(estimate['ci_low'])} a "
+                        f"{_fmt(estimate['ci_high'])})")
+        else:
+            # Differences (MD, SMD, RD) are absolute effects: shown once, in the intervention column.
+            relative = "—"
+            if estimate:
+                names = {"MD": "DM" if pt else "MD", "SMD": "DMP" if pt else "SMD", "RD": "DR" if pt else "RD"}
+                unit = f" {outcome['mid_unit']}" if outcome.get("mid_unit") and estimate["measure"] == "MD" else ""
+                intervention_risk = (f"{names.get(estimate['measure'], estimate['measure'])} "
+                                     f"{_fmt(estimate['estimate'])}{unit} ({_fmt(estimate['ci_low'])} a "
+                                     f"{_fmt(estimate['ci_high'])})")
         marks = []
         for domain in body.get("domains") or []:
             if domain["rating"]:
@@ -173,8 +230,9 @@ def summary_of_findings(profiles: list[dict[str, Any]], intervention: str, langu
                 if not pt:
                     sign = "rated down" if domain["rating"] < 0 else "rated up"
                 levels = abs(domain["rating"])
+                rationale = localize_rationale(domain["rationale"], language)
                 notes.append(f"{letter}. {outcome['name']}: {sign} {levels} {'nível' if levels == 1 else 'níveis'} "
-                             f"por {dlabels.get(domain['domain'], domain['domain'])} — {domain['rationale']}" if pt else
+                             f"por {dlabels.get(domain['domain'], domain['domain'])} — {rationale}" if pt else
                              f"{letter}. {outcome['name']}: {sign} {levels} level(s) for "
                              f"{dlabels.get(domain['domain'], domain['domain'])} — {domain['rationale']}")
         adjustment = (body.get("adjustment_a") or {})

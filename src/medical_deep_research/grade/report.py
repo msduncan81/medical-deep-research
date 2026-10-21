@@ -49,7 +49,11 @@ domain by domain, credible subgroups, and abstract-only limitations); discussion
 applicability to the setting of the question); conclusions (practical takeaways consistent with the
 certainty: "probably", "may" and "very uncertain" mean what they say).
 Cite studies only as [n] using the reference numbers listed. Do not repeat the informative statement at
-the start of an outcome section; it is inserted before your text."""
+the start of an outcome section; it is inserted before your text.
+Write ENTIRELY in the report language (no English words such as "classify" or "meaningful"; keep only
+standard abbreviations like RR, MD, CI/IC, GRADE). In the summary and conclusions, describe each outcome
+with the same verb as its informative statement (high: "reduz"/"reduces"; moderate: "provavelmente";
+low: "pode"; very low: "muito incerta"), never a stronger or weaker one."""
 
 
 def _lang(language: str | None) -> str:
@@ -65,10 +69,16 @@ _HEADINGS = {
 
 
 def intervention_label(result: GradeResult, request: RunRequest) -> str:
-    if result.comparison.intervention:
-        return result.comparison.intervention
+    """Short name of the intervention for informative statements (never the full scope definition)."""
+    short = result.comparison.short_label.strip()
+    if short and len(short) <= 80:
+        return short
     payload = request.original_query_payload or request.query_payload
-    return payload.get("intervention") or ("a intervenção" if _lang(request.language) == "pt" else "the intervention")
+    candidate = (payload.get("intervention") or result.comparison.intervention or "").strip()
+    candidate = re.split(r"[.;(]|,\s", candidate, maxsplit=1)[0].strip()
+    if candidate and len(candidate) <= 80:
+        return candidate
+    return "a intervenção" if _lang(request.language) == "pt" else "the intervention"
 
 
 def _report_prompt(result: GradeResult, request: RunRequest, studies: list[ScoredStudy], statements: dict[str, str],

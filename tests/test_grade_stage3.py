@@ -93,3 +93,31 @@ class ReportAssemblyTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PolishTests(unittest.TestCase):
+    def test_rationales_localized_and_statement_capitalized(self) -> None:
+        from medical_deep_research.grade.sof import localize_rationale
+
+        self.assertEqual(localize_rationale("312 participants, below the OIS (800)", "pt"),
+                         "312 participantes, abaixo do tamanho ótimo de informação (800)")
+        self.assertEqual(localize_rationale("CI includes the null", "en"), "CI includes the null")
+        statement = informative_statement(_profile("o1", "PA sistólica", 3), "a automedida residencial da PA", "pt")
+        self.assertEqual(statement, "A automedida residencial da PA provavelmente reduz PA sistólica")
+
+    def test_short_label_preferred_over_full_definition(self) -> None:
+        from medical_deep_research.grade.models import ComparisonSpec
+        from medical_deep_research.grade.report import intervention_label
+
+        long_def = "Automedida residencial realizada pelo paciente, com pelo menos duas medidas. A comparação principal..."
+        result = GradeResult(comparison=ComparisonSpec(intervention=long_def))
+        request = _request().model_copy(update={"query_payload": {}})
+        self.assertEqual(intervention_label(result, request), "Automedida residencial realizada pelo paciente")
+        result.comparison.short_label = "a automedida residencial da PA"
+        self.assertEqual(intervention_label(result, request), "a automedida residencial da PA")
+
+    def test_difference_measures_shown_once(self) -> None:
+        table = summary_of_findings([_profile("o1", "PA sistólica", 4)], "AMPA", "pt")
+        row = next(line for line in table.splitlines() if line.startswith("| PA sistólica"))
+        self.assertEqual(row.count("-3,30"), 1)
+        self.assertIn("DM -3,30", row)

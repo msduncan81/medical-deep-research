@@ -66,6 +66,7 @@ class SubgroupHypothesis(BaseModel):
 
 
 class ComparisonSpec(BaseModel):
+    short_label: str = Field(default="", description="2-6 word name of the intervention for sentences.")
     intervention: str = Field(default="", description="What counts as the intervention for this question.")
     comparator: str = Field(default="", description="What counts as the comparator.")
     subgroups: list[SubgroupHypothesis] = Field(default_factory=list)

@@ -41,6 +41,8 @@ Return JSON matching the schema. Rules:
   mid_value (absolute, in the outcome's unit), mid_unit and mid_source (citation or guideline). Otherwise
   target "null" and leave the MID fields empty. Never invent a MID.
 - Write outcome names and rationales in the report language. Use ids o1, o2, ...
+- comparison.short_label: a 2-6 word name of the intervention in the report language, used as the subject
+  of summary sentences (e.g. "a automedida residencial da PA").
 - comparison: define precisely what counts as the intervention and the comparator for THIS question
   (GRADE needs one comparison). If the included studies test variants of the intervention (e.g. alone vs
   combined with other components), say whether they are in scope and propose them as a subgroup
