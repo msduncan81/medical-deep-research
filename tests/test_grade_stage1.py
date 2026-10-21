@@ -198,7 +198,7 @@ class OutcomeConfirmationTests(unittest.IsolatedAsyncioTestCase):
                             session.commit()
                             return
 
-            outcomes, confirmed, _note = (await asyncio.gather(
+            outcomes, _comparison, confirmed, _note = (await asyncio.gather(
                 confirm_outcomes(_request(db), proposed, poll_seconds=0.02), user()
             ))[0]
 

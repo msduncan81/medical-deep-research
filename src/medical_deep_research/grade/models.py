@@ -55,7 +55,24 @@ class OutcomeSpec(BaseModel):
     rationale: str = Field(default="", description="Why this outcome matters for the question.")
 
 
+class SubgroupHypothesis(BaseModel):
+    """A priori subgroup hypothesis with its expected direction (Core GRADE 3: at most ~3, pre-specified)."""
+
+    id: str = Field(description="Short id, e.g. 's1'.")
+    variable: str = Field(description="What distinguishes the subgroups, e.g. 'co-interventions'.")
+    levels: list[str] = Field(default_factory=list, description="Two or three levels, e.g. ['alone', 'with titration'].")
+    expected_larger_benefit: str = Field(default="", description="The level expected to benefit more.")
+    rationale: str = ""
+
+
+class ComparisonSpec(BaseModel):
+    intervention: str = Field(default="", description="What counts as the intervention for this question.")
+    comparator: str = Field(default="", description="What counts as the comparator.")
+    subgroups: list[SubgroupHypothesis] = Field(default_factory=list)
+
+
 class OutcomeProposal(BaseModel):
+    comparison: ComparisonSpec = Field(default_factory=ComparisonSpec)
     outcomes: list[OutcomeSpec] = Field(default_factory=list)
     notes: str = ""
 
@@ -117,10 +134,14 @@ class StudyOutcomeData(BaseModel):
 
 class StudyExtraction(BaseModel):
     study_ref: int = 0
+    subgroup_levels: dict[str, str] = Field(
+        default_factory=dict, description="subgroup hypothesis id -> level of this study (or 'unclear')"
+    )
     items: list[StudyOutcomeData] = Field(default_factory=list)
 
 
 class GradeStage1Result(BaseModel):
+    comparison: ComparisonSpec = Field(default_factory=ComparisonSpec)
     outcomes: list[OutcomeSpec] = Field(default_factory=list)
     outcomes_confirmed_by_user: bool = False
     review_map: ReviewMap = Field(default_factory=ReviewMap)

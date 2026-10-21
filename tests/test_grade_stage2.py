@@ -203,3 +203,44 @@ class IndirectnessCapTests(unittest.IsolatedAsyncioTestCase):
 
         body = (await assess_outcomes(structured_call, request, [SBP], bodies))[0].bodies[0]
         self.assertEqual(next(d for d in body.domains if d.domain == "indirectness").rating, -1)
+
+
+class SubgroupTests(unittest.TestCase):
+    def _bodies(self, expected: str):
+        from medical_deep_research.grade.models import SubgroupHypothesis
+
+        hypothesis = SubgroupHypothesis(id="s1", variable="co-interventions", levels=["alone", "titration"],
+                                        expected_larger_benefit=expected)
+        rows = [(1, -1.0, -2.0, 0.0, "alone"), (2, -1.2, -2.2, -0.2, "alone"),
+                (3, -8.0, -9.0, -7.0, "titration"), (4, -7.5, -8.5, -6.5, "titration")]
+        extractions = [StudyExtraction(study_ref=r, subgroup_levels={"s1": lvl},
+                                       items=[_item(r, est, lo, hi, n=1000)]) for r, est, lo, hi, lvl in rows]
+        return build_bodies([SBP], extractions, [hypothesis])[0]
+
+    def test_credible_subgroup_explains_heterogeneity(self) -> None:
+        body = self._bodies("titration")
+        self.assertTrue(body.subgroups[0].credible)
+        judgement = inconsistency(body)
+        self.assertEqual(judgement.rating, 0)
+        self.assertIn("explained by the pre-specified subgroup", judgement.rationale)
+
+    def test_subgroup_in_unexpected_direction_does_not_explain(self) -> None:
+        body = self._bodies("alone")
+        self.assertFalse(body.subgroups[0].credible)
+        self.assertEqual(inconsistency(body).rating, -1)  # strong unexplained heterogeneity stays rated down
+
+
+class ComparisonNormalizationTests(unittest.TestCase):
+    def test_subgroups_capped_and_cleaned(self) -> None:
+        from medical_deep_research.grade.models import ComparisonSpec, SubgroupHypothesis
+        from medical_deep_research.grade.outcomes import normalize_comparison
+
+        spec = ComparisonSpec(intervention="x", subgroups=[
+            SubgroupHypothesis(id="", variable="a", levels=["1", "2"], expected_larger_benefit="3"),
+            SubgroupHypothesis(id="s2", variable="b", levels=["only one"]),
+            *[SubgroupHypothesis(id=f"s{i}", variable=f"v{i}", levels=["p", "q"]) for i in range(5)],
+        ])
+        cleaned = normalize_comparison(spec)
+        self.assertEqual(len(cleaned.subgroups), 2)  # 3 kept by the cap, one dropped for a single level
+        self.assertEqual(cleaned.subgroups[0].id, "s1")
+        self.assertEqual(cleaned.subgroups[0].expected_larger_benefit, "")  # not one of the levels

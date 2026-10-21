@@ -19,12 +19,13 @@ from pydantic import BaseModel
 from ..languages import language_display_name
 from ..models import ApprovalRequest, ApprovalStatus, RunRequest
 from ..research.models import ScoredStudy
-from .models import CertaintyTarget, OutcomeImportance, OutcomeProposal, OutcomeSpec
+from .models import ComparisonSpec, CertaintyTarget, OutcomeImportance, OutcomeProposal, OutcomeSpec
 
 TModel = TypeVar("TModel", bound=BaseModel)
 StructuredCall = Callable[[str, str, str, type[TModel]], Awaitable[TModel]]
 
 MAX_OUTCOMES = 7
+MAX_SUBGROUPS = 3
 OUTCOME_CONFIRMATION_TYPE = "outcome_confirmation"
 DEFAULT_CONFIRMATION_TIMEOUT_SECONDS = 1800
 
@@ -40,6 +41,12 @@ Return JSON matching the schema. Rules:
   mid_value (absolute, in the outcome's unit), mid_unit and mid_source (citation or guideline). Otherwise
   target "null" and leave the MID fields empty. Never invent a MID.
 - Write outcome names and rationales in the report language. Use ids o1, o2, ...
+- comparison: define precisely what counts as the intervention and the comparator for THIS question
+  (GRADE needs one comparison). If the included studies test variants of the intervention (e.g. alone vs
+  combined with other components), say whether they are in scope and propose them as a subgroup
+  hypothesis instead of letting them blur the definition.
+- subgroups: at most 3 a priori hypotheses, each with a variable, 2-3 levels and the level expected to
+  benefit more (direction), with a short rationale. Only hypotheses with a plausible clinical rationale.
 """
 
 
@@ -62,6 +69,22 @@ def outcome_prompt(request: RunRequest, studies: list[ScoredStudy]) -> str:
         f"Report language: {language_display_name(request.language)}\n\n"
         f"Included studies (titles and abstracts):\n{_study_digest(studies)}"
     )
+
+
+def normalize_comparison(comparison: ComparisonSpec) -> ComparisonSpec:
+    data = comparison.model_copy(deep=True)
+    cleaned = []
+    for index, hypothesis in enumerate(data.subgroups[:MAX_SUBGROUPS], start=1):
+        levels = [lvl.strip() for lvl in hypothesis.levels if lvl and lvl.strip()][:3]
+        if len(levels) < 2 or not hypothesis.variable.strip():
+            continue
+        hypothesis.levels = levels
+        hypothesis.id = hypothesis.id or f"s{index}"
+        if hypothesis.expected_larger_benefit not in levels:
+            hypothesis.expected_larger_benefit = ""
+        cleaned.append(hypothesis)
+    data.subgroups = cleaned
+    return data
 
 
 def normalize_outcomes(proposal: OutcomeProposal) -> list[OutcomeSpec]:
@@ -89,11 +112,11 @@ async def propose_outcomes(
     structured_call: StructuredCall,
     request: RunRequest,
     studies: list[ScoredStudy],
-) -> list[OutcomeSpec]:
+) -> tuple[list[OutcomeSpec], ComparisonSpec]:
     proposal = await structured_call(
         "grade_outcomes", OUTCOME_INSTRUCTIONS, outcome_prompt(request, studies), OutcomeProposal
     )
-    return normalize_outcomes(proposal)
+    return normalize_outcomes(proposal), normalize_comparison(proposal.comparison)
 
 
 # ---------------------------------------------------------------------------
@@ -108,14 +131,18 @@ def _session(request: RunRequest):
     return Session(create_engine(f"sqlite:///{request.database_path}"))
 
 
-def create_outcome_confirmation(request: RunRequest, outcomes: list[OutcomeSpec]) -> str | None:
+def create_outcome_confirmation(
+    request: RunRequest, outcomes: list[OutcomeSpec], comparison: ComparisonSpec | None = None
+) -> str | None:
     session = _session(request)
     if session is None:
         return None
     details = {
         "type": OUTCOME_CONFIRMATION_TYPE,
         "proposed": [o.model_dump(mode="json") for o in outcomes],
+        "comparison": (comparison or ComparisonSpec()).model_dump(mode="json"),
         "confirmed": None,
+        "confirmed_comparison": None,
     }
     with session:
         approval = ApprovalRequest(
@@ -152,29 +179,36 @@ def _confirmation_timeout() -> float:
 async def confirm_outcomes(
     request: RunRequest,
     proposed: list[OutcomeSpec],
+    comparison: ComparisonSpec | None = None,
     *,
     poll_seconds: float = 1.0,
-) -> tuple[list[OutcomeSpec], bool, str]:
-    """Wait for the user to confirm/edit the outcomes. Returns (outcomes, confirmed_by_user, note).
+) -> tuple[list[OutcomeSpec], ComparisonSpec, bool, str]:
+    """Wait for the user to confirm/edit outcomes and comparison.
 
-    Without a database (headless runs) or after the timeout, the proposal is used and marked
-    as not confirmed, so the report can say so.
+    Returns (outcomes, comparison, confirmed_by_user, note). Without a database (headless runs) or after
+    the timeout, the proposal is used and marked as not confirmed, so the report can say so.
     """
-    approval_id = create_outcome_confirmation(request, proposed)
+    comparison = comparison or ComparisonSpec()
+    approval_id = create_outcome_confirmation(request, proposed, comparison)
     if approval_id is None:
-        return proposed, False, "Outcomes were not confirmed by the user (no interactive session)."
+        return proposed, comparison, False, "Outcomes were not confirmed by the user (no interactive session)."
     deadline = asyncio.get_running_loop().time() + _confirmation_timeout()
     while asyncio.get_running_loop().time() < deadline:
         status, details = read_outcome_confirmation(request, approval_id)
         if status == ApprovalStatus.APPROVED.value:
             confirmed = details.get("confirmed")
+            confirmed_comparison = details.get("confirmed_comparison")
+            final_comparison = (
+                normalize_comparison(ComparisonSpec.model_validate(confirmed_comparison))
+                if isinstance(confirmed_comparison, dict) else comparison
+            )
             if isinstance(confirmed, list) and confirmed:
                 outcomes = normalize_outcomes(
                     OutcomeProposal(outcomes=[OutcomeSpec.model_validate(item) for item in confirmed])
                 )
-                return outcomes, True, "Outcomes confirmed by the user."
-            return proposed, True, "Proposed outcomes accepted by the user."
+                return outcomes, final_comparison, True, "Outcomes confirmed by the user."
+            return proposed, final_comparison, True, "Proposed outcomes accepted by the user."
         if status == ApprovalStatus.REJECTED.value:
-            return proposed, False, "The user skipped outcome confirmation; proposed outcomes were used."
+            return proposed, comparison, False, "The user skipped outcome confirmation; proposed outcomes were used."
         await asyncio.sleep(poll_seconds)
-    return proposed, False, "Outcome confirmation timed out; proposed outcomes were used."
+    return proposed, comparison, False, "Outcome confirmation timed out; proposed outcomes were used."

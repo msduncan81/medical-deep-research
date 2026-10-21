@@ -14,7 +14,7 @@ import re
 from collections.abc import Awaitable, Callable
 
 from ..research.models import ScoredStudy
-from .models import OutcomeSpec, ReviewMap, StudyDesign, StudyExtraction, StudyOutcomeData
+from .models import ComparisonSpec, OutcomeSpec, ReviewMap, StudyDesign, StudyExtraction, StudyOutcomeData
 from .outcomes import StructuredCall
 from .reviews import is_network_meta_analysis, is_systematic_review
 
@@ -50,6 +50,8 @@ Rules:
   review itself rated the outcome down for risk of bias; a "high" rating in a single domain (e.g.
   performance bias in unblindable trials) is not enough.
 - source_text: "fulltext" if the passage came from the full text section, else "abstract".
+- subgroup_levels (study level): for each subgroup id listed, the level this study belongs to, copied
+  exactly from the listed levels, or "unclear".
 """
 
 
@@ -74,7 +76,18 @@ def _relevant_fulltext(fulltext: str, outcomes: list[OutcomeSpec], limit: int) -
     return "\n\n".join(sorted(chosen, key=lambda p: order[p]))
 
 
-def extraction_prompt(study: ScoredStudy, outcomes: list[OutcomeSpec], fulltext: str | None) -> str:
+def _comparison_text(comparison: ComparisonSpec | None) -> str:
+    if comparison is None or not (comparison.intervention or comparison.subgroups):
+        return ""
+    lines = [f"Intervention in scope: {comparison.intervention or '?'}; comparator: {comparison.comparator or '?'}"]
+    for h in comparison.subgroups:
+        lines.append(f"Subgroup {h.id}: {h.variable} -> levels {h.levels}")
+    return "\n".join(lines) + "\n\n"
+
+
+def extraction_prompt(
+    study: ScoredStudy, outcomes: list[OutcomeSpec], fulltext: str | None, comparison: ComparisonSpec | None = None
+) -> str:
     outcome_lines = "\n".join(
         f"- {o.id}: {o.name} ({o.kind}{'; unit ' + o.mid_unit if o.mid_unit else ''})" for o in outcomes
     )
@@ -82,7 +95,7 @@ def extraction_prompt(study: ScoredStudy, outcomes: list[OutcomeSpec], fulltext:
     if fulltext:
         body += f"\n\nFULL TEXT (selected sections):\n{_relevant_fulltext(fulltext, outcomes, MAX_TEXT_CHARS)}"
     return (
-        f"Outcome ids:\n{outcome_lines}\n\n"
+        f"{_comparison_text(comparison)}Outcome ids:\n{outcome_lines}\n\n"
         f"STUDY [{study.reference_number}]: {study.title}\n"
         f"Journal/year: {study.journal or '?'} {study.publication_year or ''}\n"
         f"Publication types: {', '.join(study.publication_types or []) or 'unknown'}\n\n{body}"
@@ -153,13 +166,19 @@ async def extract_study(
     study: ScoredStudy,
     outcomes: list[OutcomeSpec],
     fulltext: str | None,
+    comparison: ComparisonSpec | None = None,
 ) -> StudyExtraction:
     raw = await structured_call(
-        "grade_extraction", EXTRACTION_INSTRUCTIONS, extraction_prompt(study, outcomes, fulltext), StudyExtraction
+        "grade_extraction", EXTRACTION_INSTRUCTIONS, extraction_prompt(study, outcomes, fulltext, comparison),
+        StudyExtraction,
     )
     ids = {o.id for o in outcomes}
     items = [clean for item in raw.items if (clean := _sanitize(item, study, ids)) is not None]
-    return StudyExtraction(study_ref=int(study.reference_number or 0), items=items)
+    levels: dict[str, str] = {}
+    for hypothesis in (comparison.subgroups if comparison else []):
+        value = (raw.subgroup_levels or {}).get(hypothesis.id, "unclear")
+        levels[hypothesis.id] = value if value in hypothesis.levels else "unclear"
+    return StudyExtraction(study_ref=int(study.reference_number or 0), subgroup_levels=levels, items=items)
 
 
 async def extract_all(
@@ -168,6 +187,7 @@ async def extract_all(
     outcomes: list[OutcomeSpec],
     fulltext_for: Callable[[ScoredStudy], str | None],
     *,
+    comparison: ComparisonSpec | None = None,
     concurrency: int = 2,
     on_progress: Callable[[ScoredStudy], Awaitable[None]] | None = None,
 ) -> tuple[list[StudyExtraction], list[str]]:
@@ -179,7 +199,7 @@ async def extract_all(
             if on_progress:
                 await on_progress(study)
             try:
-                return await extract_study(structured_call, study, outcomes, fulltext_for(study))
+                return await extract_study(structured_call, study, outcomes, fulltext_for(study), comparison)
             except Exception as exc:  # noqa: BLE001 - one bad study must not stop the graph
                 notes.append(f"[{study.reference_number}] extraction failed: {type(exc).__name__}")
                 return None

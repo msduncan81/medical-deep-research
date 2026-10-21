@@ -8,10 +8,13 @@ from typing import Any, Callable
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QComboBox,
+    QFormLayout,
     QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -36,6 +39,28 @@ _COLUMNS: list[tuple[str, str, Any]] = [
 ]
 
 
+def format_subgroup(hypothesis: dict[str, Any]) -> str:
+    """'variable: level A | level B > expected level' (one line per a priori subgroup hypothesis)."""
+    line = f"{hypothesis.get('variable', '')}: {' | '.join(hypothesis.get('levels') or [])}"
+    if hypothesis.get("expected_larger_benefit"):
+        line += f" > {hypothesis['expected_larger_benefit']}"
+    return line
+
+
+def parse_subgroup(line: str) -> dict[str, Any] | None:
+    if ":" not in line:
+        return None
+    variable, rest = line.split(":", 1)
+    expected = ""
+    if ">" in rest:
+        rest, expected = rest.rsplit(">", 1)
+    levels = [lvl.strip() for lvl in rest.split("|") if lvl.strip()]
+    if not variable.strip() or len(levels) < 2:
+        return None
+    return {"variable": variable.strip(), "levels": levels, "expected_larger_benefit": expected.strip(),
+            "rationale": ""}
+
+
 def find_outcome_approval(approvals: list[ApprovalRequest]) -> tuple[ApprovalRequest | None, dict[str, Any]]:
     for approval in approvals:
         if approval.status != ApprovalStatus.PENDING.value or not approval.details_json:
@@ -52,7 +77,7 @@ def find_outcome_approval(approvals: list[ApprovalRequest]) -> tuple[ApprovalReq
 class OutcomeCheckpointPanel(QFrame):
     """Shows the proposed outcomes; the user edits them and confirms, or skips."""
 
-    confirmed = Signal(str, list)  # noqa: N815  (approval id, outcomes)
+    confirmed = Signal(str, list, dict)  # noqa: N815  (approval id, outcomes, comparison)
     skipped = Signal(str)  # noqa: N815
 
     def __init__(self, t: Callable[[str], str], parent=None) -> None:
@@ -74,6 +99,18 @@ class OutcomeCheckpointPanel(QFrame):
         self._desc.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px;")
         layout.addWidget(self._title)
         layout.addWidget(self._desc)
+        form = QFormLayout()
+        self._intervention = QLineEdit()
+        self._comparator = QLineEdit()
+        self._subgroups = QPlainTextEdit()
+        self._subgroups.setFixedHeight(64)
+        self._intervention_label = QLabel()
+        self._comparator_label = QLabel()
+        self._subgroups_label = QLabel()
+        form.addRow(self._intervention_label, self._intervention)
+        form.addRow(self._comparator_label, self._comparator)
+        form.addRow(self._subgroups_label, self._subgroups)
+        layout.addLayout(form)
         self._table = QTableWidget(0, len(_COLUMNS))
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._table.horizontalHeader().setStretchLastSection(True)
@@ -105,6 +142,10 @@ class OutcomeCheckpointPanel(QFrame):
         self._remove.setText(self._t("outcome_remove"))
         self._skip.setText(self._t("outcome_skip"))
         self._confirm.setText(self._t("outcome_confirm"))
+        self._intervention_label.setText(self._t("comparison_intervention"))
+        self._comparator_label.setText(self._t("comparison_comparator"))
+        self._subgroups_label.setText(self._t("comparison_subgroups"))
+        self._subgroups.setPlaceholderText(self._t("comparison_subgroups_hint"))
 
     def set_approvals(self, approvals: list[ApprovalRequest]) -> None:
         approval, details = find_outcome_approval(approvals)
@@ -116,6 +157,11 @@ class OutcomeCheckpointPanel(QFrame):
             return  # keep the user's edits while the checkpoint is open
         self._approval_id = approval.id
         self._proposed = [o for o in details.get("proposed") or [] if isinstance(o, dict)]
+        comparison = details.get("comparison") if isinstance(details.get("comparison"), dict) else {}
+        self._intervention.setText(str(comparison.get("intervention") or ""))
+        self._comparator.setText(str(comparison.get("comparator") or ""))
+        self._subgroups.setPlainText("\n".join(format_subgroup(h) for h in comparison.get("subgroups") or []
+                                               if isinstance(h, dict)))
         self._table.setRowCount(0)
         for outcome in self._proposed:
             self._append_row(outcome)
@@ -172,9 +218,16 @@ class OutcomeCheckpointPanel(QFrame):
             outcomes.append(data)
         return outcomes
 
+    def comparison(self) -> dict[str, Any]:
+        subgroups = [h for line in self._subgroups.toPlainText().splitlines() if (h := parse_subgroup(line))]
+        for index, hypothesis in enumerate(subgroups, start=1):
+            hypothesis["id"] = f"s{index}"
+        return {"intervention": self._intervention.text().strip(), "comparator": self._comparator.text().strip(),
+                "subgroups": subgroups}
+
     def _on_confirm(self) -> None:
         if self._approval_id:
-            self.confirmed.emit(self._approval_id, self.table_outcomes())
+            self.confirmed.emit(self._approval_id, self.table_outcomes(), self.comparison())
             self.setVisible(False)
 
     def _on_skip(self) -> None:

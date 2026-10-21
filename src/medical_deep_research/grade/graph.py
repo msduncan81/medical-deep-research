@@ -18,7 +18,7 @@ from ..research.models import ScoredStudy
 from .extraction import extract_all, studies_to_extract
 from .fulltext import fetch_missing_fulltexts
 from .assessment import OutcomeProfile, assess_outcomes
-from .models import GradeResult, GradeStage1Result, OutcomeSpec, ReviewMap, StudyExtraction
+from .models import ComparisonSpec, GradeResult, GradeStage1Result, OutcomeSpec, ReviewMap, StudyExtraction
 from .synthesis import EvidenceBody, build_bodies
 from .outcomes import StructuredCall, confirm_outcomes, propose_outcomes
 from .reviews import ReferenceFetcher, map_reviews
@@ -28,7 +28,9 @@ class GradeState(TypedDict, total=False):
     request: RunRequest
     studies: list[ScoredStudy]
     proposed_outcomes: list[OutcomeSpec]
+    proposed_comparison: ComparisonSpec
     outcomes: list[OutcomeSpec]
+    comparison: ComparisonSpec
     outcomes_confirmed_by_user: bool
     review_map: ReviewMap
     fulltexts: dict[int, str]
@@ -60,13 +62,15 @@ def build_stage1_graph(
 
     async def node_propose(state: GradeState) -> dict[str, Any]:
         await progress("propose_outcomes", "Proposing outcomes and certainty targets")
-        outcomes = await propose_outcomes(structured_call, state["request"], state["studies"])
-        return {"proposed_outcomes": outcomes}
+        outcomes, comparison = await propose_outcomes(structured_call, state["request"], state["studies"])
+        return {"proposed_outcomes": outcomes, "proposed_comparison": comparison}
 
     async def node_confirm(state: GradeState) -> dict[str, Any]:
         await progress("confirm_outcomes", "Waiting for the user to confirm the outcomes")
-        outcomes, confirmed, note = await confirm_outcomes(state["request"], state["proposed_outcomes"])
-        return {"outcomes": outcomes, "outcomes_confirmed_by_user": confirmed,
+        outcomes, comparison, confirmed, note = await confirm_outcomes(
+            state["request"], state["proposed_outcomes"], state.get("proposed_comparison")
+        )
+        return {"outcomes": outcomes, "comparison": comparison, "outcomes_confirmed_by_user": confirmed,
                 "notes": [*state.get("notes", []), note]}
 
     async def node_map_reviews(state: GradeState) -> dict[str, Any]:
@@ -93,17 +97,21 @@ def build_stage1_graph(
         extractions, fail_notes = await extract_all(
             structured_call, selected, state["outcomes"],
             lambda st: texts.get(int(st.reference_number or 0)), on_progress=on_progress,
+            comparison=state.get("comparison"),
         )
         return {"extractions": extractions, "notes": [*state.get("notes", []), *skip_notes, *fail_notes]}
 
     async def node_build_bodies(state: GradeState) -> dict[str, Any]:
         await progress("build_bodies", "Assembling bodies of evidence per outcome and design")
-        return {"bodies": build_bodies(state["outcomes"], state.get("extractions", []))}
+        comparison = state.get("comparison")
+        return {"bodies": build_bodies(state["outcomes"], state.get("extractions", []),
+                                       comparison.subgroups if comparison else [])}
 
     async def node_assess(state: GradeState) -> dict[str, Any]:
         bodies = state.get("bodies", [])
         await progress("assess", f"Rating certainty for {len(bodies)} bodies of evidence")
-        profiles = await assess_outcomes(structured_call, state["request"], state["outcomes"], bodies)
+        profiles = await assess_outcomes(structured_call, state["request"], state["outcomes"], bodies,
+                                         comparison=state.get("comparison"))
         return {"profiles": profiles}
 
     graph = StateGraph(GradeState)
@@ -141,6 +149,7 @@ async def run_stage1(
     graph = build_stage1_graph(structured_call, fetch_references, fulltext_for, progress, fetch_full)
     final: GradeState = await graph.ainvoke({"request": request, "studies": studies, "notes": []})
     return GradeStage1Result(
+        comparison=final.get("comparison") or ComparisonSpec(),
         outcomes=final.get("outcomes", []),
         outcomes_confirmed_by_user=bool(final.get("outcomes_confirmed_by_user")),
         review_map=final.get("review_map") or ReviewMap(),
@@ -163,6 +172,7 @@ async def run_grade(
                                with_assessment=True)
     final: GradeState = await graph.ainvoke({"request": request, "studies": studies, "notes": []})
     return GradeResult(
+        comparison=final.get("comparison") or ComparisonSpec(),
         outcomes=final.get("outcomes", []),
         outcomes_confirmed_by_user=bool(final.get("outcomes_confirmed_by_user")),
         review_map=final.get("review_map") or ReviewMap(),

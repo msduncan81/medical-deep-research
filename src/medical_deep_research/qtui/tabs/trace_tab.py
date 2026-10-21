@@ -134,10 +134,10 @@ class TraceTab(QWidget):
         self._rebuild_pdf_panel()
         self._outcome_panel.retranslate()
 
-    def _on_outcomes_confirmed(self, approval_id: str, outcomes: list) -> None:
+    def _on_outcomes_confirmed(self, approval_id: str, outcomes: list, comparison: dict) -> None:
         if not self._service or not self._run:
             return
-        self._service.resolve_outcome_confirmation(approval_id, outcomes)
+        self._service.resolve_outcome_confirmation(approval_id, outcomes, comparison)
         self.statusMessage.emit(self._t("outcome_confirmed_status"))
         self.checkpointChanged.emit(self._run.id)
 

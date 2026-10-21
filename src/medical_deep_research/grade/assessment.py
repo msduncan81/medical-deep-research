@@ -30,7 +30,7 @@ from .domains import (
     starting_level,
     sum_certainty,
 )
-from .models import OutcomeSpec
+from .models import ComparisonSpec, OutcomeSpec
 from .outcomes import StructuredCall
 from .synthesis import EvidenceBody
 
@@ -85,6 +85,7 @@ class BodyAssessment(BaseModel):
     holistic_b: HolisticOutput = Field(default_factory=HolisticOutput)
     coherence_flags: list[str] = Field(default_factory=list)
     not_pooled: list[str] = Field(default_factory=list)
+    subgroups: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class OutcomeProfile(BaseModel):
@@ -145,8 +146,14 @@ two domains. Then give the final certainty: "high", "moderate", "low" or "very l
 rationale in the report language."""
 
 
-def _target_text(request: RunRequest, outcome: OutcomeSpec) -> str:
+def _target_text(request: RunRequest, outcome: OutcomeSpec, comparison: ComparisonSpec | None = None) -> str:
     question = request.original_query or request.query
+    if comparison and comparison.intervention:
+        question += (f"\nIntervention in scope (confirmed definition): {comparison.intervention}\n"
+                     f"Comparator: {comparison.comparator or '?'}")
+        if comparison.subgroups:
+            question += "\nPre-specified subgroups (variation between them is inconsistency, not indirectness): " + \
+                "; ".join(f"{h.variable} {h.levels}" for h in comparison.subgroups)
     target = (
         f"MID {outcome.mid_value} {outcome.mid_unit or ''} ({outcome.mid_source or 'no source'})"
         if outcome.target == "mid" else "null (any effect)"
@@ -164,6 +171,10 @@ def _body_text(body: EvidenceBody) -> str:
         p = body.pooled
         lines.append(f"Summary estimate ({p.measure}, random effects, k={p.k}): {p.estimate:.3g} "
                      f"[{p.ci_low:.3g}; {p.ci_high:.3g}], I² {p.i2 if p.i2 is not None else 'n/a'}%")
+    for g in body.subgroups:
+        lines.append(f"Subgroup '{g.variable}': " + "; ".join(
+            f"{lv.level} {lv.estimate:.3g} [{lv.ci_low:.3g}; {lv.ci_high:.3g}] k={lv.k}" for lv in g.levels
+        ) + f"; interaction P = {g.p_interaction}; expected larger benefit: {g.expected_larger_benefit or '?'}")
     for item in body.items:
         effect = (f"{item.effect_measure} {item.effect} [{item.ci_low}; {item.ci_high}], favours {item.favours}"
                   if item.effect is not None else "no comparative effect")
@@ -207,9 +218,10 @@ async def assess_body(
     request: RunRequest,
     outcome: OutcomeSpec,
     body: EvidenceBody,
+    comparison: ComparisonSpec | None = None,
 ) -> BodyAssessment:
     start = starting_level(body)
-    target = _target_text(request, outcome)
+    target = _target_text(request, outcome, comparison)
     details = _body_text(body)
 
     flags: list[str] = []
@@ -270,6 +282,7 @@ async def assess_body(
         estimate=pooled.model_dump(exclude={"study_estimates"}) if pooled else None,
         domains=domains, certainty_computed=computed, certainty_a=certainty_a, adjustment_a=adjustment,
         certainty_b=certainty_b, holistic_b=holistic, coherence_flags=flags, not_pooled=body.not_pooled,
+        subgroups=[g.model_dump() | {"credible": g.credible} for g in body.subgroups],
     )
 
 
@@ -311,13 +324,14 @@ async def assess_outcomes(
     outcomes: list[OutcomeSpec],
     bodies: list[EvidenceBody],
     *,
+    comparison: ComparisonSpec | None = None,
     concurrency: int = 2,
 ) -> list[OutcomeProfile]:
     semaphore = asyncio.Semaphore(concurrency)
 
     async def one(outcome: OutcomeSpec, body: EvidenceBody) -> BodyAssessment:
         async with semaphore:
-            return await assess_body(structured_call, request, outcome, body)
+            return await assess_body(structured_call, request, outcome, body, comparison)
 
     tasks = {(b.outcome_id, b.design): one(next(o for o in outcomes if o.id == b.outcome_id), b) for b in bodies}
     results = dict(zip(tasks, await asyncio.gather(*tasks.values())))
@@ -325,6 +339,10 @@ async def assess_outcomes(
     for outcome in outcomes:
         assessed = [results[key] for key in results if key[0] == outcome.id]
         profile = OutcomeProfile(outcome=outcome, bodies=assessed)
+        if not assessed:
+            profile.integration_note = "no included study reported this outcome"
+            profiles.append(profile)
+            continue
         profile.certainty_a, note = integrate(assessed, "certainty_a")
         profile.certainty_b, _ = integrate(assessed, "certainty_b")
         profile.integration_note = note

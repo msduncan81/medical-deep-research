@@ -14,7 +14,7 @@ from collections import defaultdict
 
 from pydantic import BaseModel, Field
 
-from .models import OutcomeSpec, StudyDesign, StudyExtraction, StudyOutcomeData
+from .models import OutcomeKind, OutcomeSpec, StudyDesign, StudyExtraction, StudyOutcomeData, SubgroupHypothesis
 
 RATIO_MEASURES = {"RR", "OR", "HR"}
 DIFFERENCE_MEASURES = {"MD", "SMD", "RD"}
@@ -35,6 +35,28 @@ class PooledEstimate(BaseModel):
     )
 
 
+class SubgroupLevelResult(BaseModel):
+    level: str
+    estimate: float
+    ci_low: float
+    ci_high: float
+    k: int
+
+
+class SubgroupResult(BaseModel):
+    hypothesis_id: str
+    variable: str
+    levels: list[SubgroupLevelResult] = Field(default_factory=list)
+    p_interaction: float | None = None
+    expected_larger_benefit: str = ""
+    direction_as_expected: bool | None = None
+
+    @property
+    def credible(self) -> bool:
+        """Pre-specified, with direction, interaction P < 0.05 and the expected direction (ICEMAN core items)."""
+        return bool(self.p_interaction is not None and self.p_interaction < 0.05 and self.direction_as_expected)
+
+
 class EvidenceBody(BaseModel):
     outcome_id: str
     design: str  # "rct" | "nrs"
@@ -44,6 +66,7 @@ class EvidenceBody(BaseModel):
     control_event_rate: float | None = None
     not_pooled: list[str] = Field(default_factory=list)
     derived: list[str] = Field(default_factory=list)
+    subgroups: list[SubgroupResult] = Field(default_factory=list)
     participants_complete: bool = False
     from_review: bool = False
 
@@ -133,6 +156,60 @@ def pool(measure: str, estimates: list[tuple[int, float, float, float]]) -> Pool
     )
 
 
+def _fixed_q(log: bool, rows: list[tuple[int, float, float, float]]) -> tuple[float, float, float]:
+    """(Q, sum of weights, weighted mean) under a fixed-effect model."""
+    ys, ws = [], []
+    for _ref, est, lo, hi in rows:
+        y = math.log(est) if log else est
+        se = ((math.log(hi) - math.log(lo)) if log else (hi - lo)) / (2 * Z95)
+        if se > 0:
+            ys.append(y)
+            ws.append(1 / se**2)
+    if not ws:
+        return 0.0, 0.0, 0.0
+    mean = sum(w * y for w, y in zip(ws, ys)) / sum(ws)
+    return sum(w * (y - mean) ** 2 for w, y in zip(ws, ys)), sum(ws), mean
+
+
+def _benefit(measure: str, value: float, lower_is_better: bool) -> float:
+    magnitude = math.log(value) if measure in RATIO_MEASURES else value
+    return -magnitude if lower_is_better else magnitude
+
+
+def subgroup_analysis(
+    pooled: PooledEstimate,
+    hypothesis: SubgroupHypothesis,
+    levels_by_ref: dict[int, str],
+    outcome: OutcomeSpec,
+) -> SubgroupResult | None:
+    groups: dict[str, list[tuple[int, float, float, float]]] = defaultdict(list)
+    for row in pooled.study_estimates:
+        level = levels_by_ref.get(row[0], "unclear")
+        if level in hypothesis.levels:
+            groups[level].append(row)
+    if len([g for g in groups.values() if g]) < 2:
+        return None
+    log = pooled.measure in RATIO_MEASURES
+    q_total, _, _ = _fixed_q(log, [r for rows in groups.values() for r in rows])
+    q_within = sum(_fixed_q(log, rows)[0] for rows in groups.values())
+    df = len(groups) - 1
+    p_value = round(_chi2_sf(max(0.0, q_total - q_within), df), 4)
+    results = []
+    for level, rows in groups.items():
+        sub = pool(pooled.measure, rows)
+        if sub:
+            results.append(SubgroupLevelResult(level=level, estimate=sub.estimate, ci_low=sub.ci_low,
+                                               ci_high=sub.ci_high, k=sub.k))
+    direction = None
+    if hypothesis.expected_larger_benefit and results:
+        lower = _benefit_is_lower(outcome)
+        best = max(results, key=lambda r: _benefit(pooled.measure, r.estimate, lower))
+        direction = best.level == hypothesis.expected_larger_benefit
+    return SubgroupResult(hypothesis_id=hypothesis.id, variable=hypothesis.variable, levels=results,
+                          p_interaction=p_value, expected_larger_benefit=hypothesis.expected_larger_benefit,
+                          direction_as_expected=direction)
+
+
 def _design_group(item: StudyOutcomeData) -> str | None:
     if item.design in (StudyDesign.RCT, StudyDesign.SYSTEMATIC_REVIEW):
         return "rct"  # reviews are taken as reviews of randomized trials unless stated otherwise
@@ -149,7 +226,15 @@ def _participants(item: StudyOutcomeData) -> int | None:
     return None
 
 
-def build_bodies(outcomes: list[OutcomeSpec], extractions: list[StudyExtraction]) -> list[EvidenceBody]:
+def build_bodies(
+    outcomes: list[OutcomeSpec],
+    extractions: list[StudyExtraction],
+    subgroups: list[SubgroupHypothesis] | None = None,
+) -> list[EvidenceBody]:
+    levels_by_hypothesis: dict[str, dict[int, str]] = defaultdict(dict)
+    for extraction in extractions:
+        for hypothesis_id, level in (extraction.subgroup_levels or {}).items():
+            levels_by_hypothesis[hypothesis_id][extraction.study_ref] = level
     by_outcome: dict[tuple[str, str], list[StudyOutcomeData]] = defaultdict(list)
     for extraction in extractions:
         for item in extraction.items:
@@ -165,10 +250,14 @@ def build_bodies(outcomes: list[OutcomeSpec], extractions: list[StudyExtraction]
             body = EvidenceBody(outcome_id=outcome.id, design=group, items=items)
             oriented: dict[str, list[tuple[int, float, float, float]]] = defaultdict(list)
             pooled_refs: set[int] = set()
+            binary = outcome.kind in ("binary", OutcomeKind.BINARY)
             for item in items:
                 result = orient(item, outcome)
                 measure = item.effect_measure or "?"
-                if result is None and (counts := rr_from_counts(item)) is not None:
+                counts = rr_from_counts(item)
+                # For binary outcomes, events per group give a common measure (RR) across studies that
+                # reported OR, RR or RD, so more studies can be combined.
+                if counts is not None and (result is None or (binary and measure != "RR")):
                     result, measure = counts, "RR"
                     body.derived.append(f"[{item.study_ref}] RR calculated from events per group")
                 if result is None:
@@ -179,6 +268,12 @@ def build_bodies(outcomes: list[OutcomeSpec], extractions: list[StudyExtraction]
                 measure = max(oriented, key=lambda m: (len(oriented[m]), m in DIFFERENCE_MEASURES))
                 body.pooled = pool(measure, oriented[measure])
                 pooled_refs = {row[0] for row in oriented[measure]}
+                if body.pooled and body.pooled.k >= 2:
+                    for hypothesis in subgroups or []:
+                        result = subgroup_analysis(body.pooled, hypothesis, levels_by_hypothesis.get(hypothesis.id, {}),
+                                                   outcome)
+                        if result:
+                            body.subgroups.append(result)
                 for other, rows in oriented.items():
                     if other != measure:
                         body.not_pooled.extend(f"[{r[0]}] reported {other}, not combined with {measure}" for r in rows)

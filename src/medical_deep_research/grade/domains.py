@@ -89,9 +89,22 @@ def inconsistency(body: EvidenceBody) -> DomainJudgement:
         f"I² {i2:.0f}%; estimates on {'both sides' if both_sides else 'one side'} of the null; "
         f"{'some' if non_overlap else 'no'} non-overlapping CIs"
     )
+    metrics: dict[str, float | int | str | None] = {"i2": i2, "k": pooled.k, "both_sides": str(both_sides),
+                                                    "non_overlapping_cis": str(non_overlap)}
+    credible = [g for g in body.subgroups if g.credible]
+    if serious and credible:
+        g = credible[0]
+        levels = "; ".join(f"{lv.level}: {lv.estimate:.3g} [{lv.ci_low:.3g}; {lv.ci_high:.3g}] (k={lv.k})"
+                           for lv in g.levels)
+        metrics["explained_by_subgroup"] = g.variable
+        return DomainJudgement(
+            domain="inconsistency", rating=0, metrics=metrics,
+            rationale=f"{rationale}; heterogeneity explained by the pre-specified subgroup '{g.variable}' "
+                      f"(interaction P = {g.p_interaction}; direction as expected): {levels}. "
+                      "Results should be presented by subgroup (Core GRADE 3).",
+        )
     return DomainJudgement(domain="inconsistency", rating=-1 if serious else 0, rationale=rationale,
-                           metrics={"i2": i2, "k": pooled.k, "both_sides": str(both_sides),
-                                    "non_overlapping_cis": str(non_overlap)})
+                           metrics=metrics)
 
 
 def _ois_binary(control_rate: float, rrr: float = 0.25, increase: bool = False) -> int:
