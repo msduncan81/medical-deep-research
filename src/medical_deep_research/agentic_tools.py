@@ -628,6 +628,7 @@ async def tool_get_studies(request: RunRequest, bridge: AgenticEventBridge, cont
 
 
 MAX_BROWSE_CALLS_PER_POOL = 6
+MAX_BROWSE_CALLS_PER_RUN = 10
 
 
 def max_browse_calls_per_pool() -> int:
@@ -653,6 +654,16 @@ async def tool_browse_studies(
         return {"error": "Call get_studies first.", "studies": []}
     calls = int(bridge._intermediate.get("browse_calls_this_pool", 0)) + 1
     bridge._intermediate["browse_calls_this_pool"] = calls
+    total = int(bridge._intermediate.get("browse_calls_total", 0)) + 1
+    bridge._intermediate["browse_calls_total"] = total
+    if total > MAX_BROWSE_CALLS_PER_RUN:
+        return {
+            "error": (
+                f"browse_studies limit reached ({MAX_BROWSE_CALLS_PER_RUN} calls in this run). "
+                "Call screen_studies now with the studies you have reviewed, then finalize_ranking."
+            ),
+            "studies": [],
+        }
     if calls > max_browse_calls_per_pool():
         return {
             "error": (
@@ -763,9 +774,11 @@ async def tool_snowball(
 ) -> dict[str, Any]:
     """Fetch the reference list or citing papers of a ranked study (snowballing)."""
     direction = "references" if str(direction).lower().startswith("ref") else "citations"
-    pool = bridge.ranked_studies or bridge._pre_scored
+    # Snowballing follows ranking (workflow step 6); before screening it only enlarges the pool and
+    # resets the browse/screening state, which let weak models loop without ever ranking.
+    pool = bridge.ranked_studies
     if not pool:
-        return {"error": "Rank studies first (get_studies/finalize_ranking) before snowballing."}
+        return {"error": "Screen and rank first (screen_studies, then finalize_ranking) before snowballing."}
     target = next((s for s in pool if s.reference_number == int(reference_number)), None)
     if target is None:
         return {"error": f"No ranked study [{reference_number}] found."}

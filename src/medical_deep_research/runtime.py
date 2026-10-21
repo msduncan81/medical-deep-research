@@ -264,6 +264,13 @@ async def _local_server_context_tokens(base_url: str, api_key: str) -> int | Non
     return None
 
 
+_RESUME_BEFORE_RANKING = (
+    "You stopped before screening and ranking. Do not browse or search further. Now call screen_studies "
+    "with the studies you reviewed, then finalize_ranking, then continue the workflow (fetch_fulltext, "
+    "appraise_evidence, verify_studies, synthesize_report) and finish with submit_report."
+)
+
+
 def grade_pipeline_enabled() -> bool:
     return os.getenv("MDR_GRADE_PIPELINE", "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -5776,6 +5783,19 @@ class LangChainLocalRuntime(NativeSDKRuntime):
                     {"messages": [HumanMessage(content=_agentic_user_prompt(request))]},
                     config={"recursion_limit": self.recursion_limit},
                 )
+                if (
+                    "submitted_report" not in bridge._intermediate
+                    and not bridge.ranked_studies
+                    and bridge._pre_scored
+                    and isinstance(result, dict)
+                    and result.get("messages")
+                ):
+                    # The model stopped after collecting studies but before ranking: resume it once.
+                    bridge._intermediate["resumed_before_ranking"] = True
+                    result = await agent.ainvoke(
+                        {"messages": [*result["messages"], HumanMessage(content=_RESUME_BEFORE_RANKING)]},
+                        config={"recursion_limit": self.recursion_limit},
+                    )
                 final_text = _langchain_final_text(result)
 
             await asyncio.wait_for(_inner(), timeout=self.agentic_timeout_seconds)

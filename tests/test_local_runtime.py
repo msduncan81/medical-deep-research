@@ -739,3 +739,46 @@ class NewToolBehaviorTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StallGuardTests(unittest.IsolatedAsyncioTestCase):
+    collect_events = LocalRuntimeTests.collect_events
+
+    async def test_snowball_requires_ranking_and_total_browse_cap(self) -> None:
+        from medical_deep_research.agentic_tools import (
+            MAX_BROWSE_CALLS_PER_RUN,
+            AgenticEventBridge,
+            tool_browse_studies,
+            tool_get_studies,
+            tool_snowball,
+        )
+
+        bridge = AgenticEventBridge()
+        bridge.search_results.append(await fake_multi_search_source("PubMed", "q"))
+        request = make_request()
+        await tool_get_studies(request, bridge, context="clinical")
+        self.assertIn("Screen and rank first", (await tool_snowball(request, bridge, 1, "citations"))["error"])
+        for i in range(MAX_BROWSE_CALLS_PER_RUN):
+            if i % 5 == 0:
+                await tool_get_studies(request, bridge, context="clinical")  # resets the per-pool count
+            await tool_browse_studies(request, bridge, page=1)
+        blocked = await tool_browse_studies(request, bridge, page=1)
+        self.assertIn("in this run", blocked["error"])
+
+    async def test_agent_is_resumed_once_when_it_stops_before_ranking(self) -> None:
+        report = make_valid_report().strip()
+
+        async def agent(tools: list[object], inputs: dict[str, object]) -> object:
+            messages = inputs["messages"]
+            resumed = any("stopped before screening" in str(getattr(m, "content", "")) for m in messages)  # type: ignore[union-attr]
+            if not resumed:
+                await call_fake_tool(tools, "search_pubmed", query="q", max_results=3)
+                await call_fake_tool(tools, "get_studies", context="clinical")
+                return {"messages": list(messages)}  # stops without ranking
+            await call_fake_tool(tools, "finalize_ranking", ranked_indices=[1], rationale="RCT")
+            await call_fake_tool(tools, "submit_report", report_markdown=report)
+            return {"messages": []}
+
+        events = await self.collect_events(agent)
+        final = [event for event in events if event.event_type == EventType.RUN_COMPLETED][-1]
+        self.assertEqual(final.extra["report_source"], "submitted_report")
