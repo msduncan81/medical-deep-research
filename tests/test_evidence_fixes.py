@@ -131,3 +131,19 @@ class FinalizeRankingScreeningTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExclusionTests(unittest.TestCase):
+    def test_target_review_excluded_by_cd_number_or_pmid(self) -> None:
+        from medical_deep_research.agentic_tools import is_excluded
+
+        request = _request().model_copy(update={"exclude_ids": ["CD006591", "30000001"]})
+        review = _study(1, doi="10.1002/14651858.CD006591.pub4")
+        older = _study(2, doi="10.1002/14651858.cd006591.pub3")
+        by_pmid = _study(3, pmid="30000001")
+        other = _study(4, pmid="123", doi="10.1000/x")
+        self.assertTrue(is_excluded(review, request))
+        self.assertTrue(is_excluded(older, request))
+        self.assertTrue(is_excluded(by_pmid, request))
+        self.assertFalse(is_excluded(other, request))
+        self.assertFalse(is_excluded(review, _request()))

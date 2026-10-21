@@ -186,6 +186,11 @@ class RunRequest(SQLModel):
     # The question as the user wrote it, when `query` was translated to English for searching.
     original_query: str | None = None
     original_query_payload: dict[str, str] = Field(default_factory=dict)
+    # Reference-set runs: fixed outcomes/comparison instead of proposal + confirmation, and studies to
+    # exclude from every search (PMIDs or DOI fragments, e.g. a Cochrane "CD012345" number).
+    grade_outcomes_override: list[dict[str, Any]] = Field(default_factory=list)
+    grade_comparison_override: dict[str, Any] = Field(default_factory=dict)
+    exclude_ids: list[str] = Field(default_factory=list)
     api_keys: dict[str, str] = Field(default_factory=dict)
     offline_mode: bool = False
     recent_years_lookback: int = Field(default=5)

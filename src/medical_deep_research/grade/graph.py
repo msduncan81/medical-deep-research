@@ -18,9 +18,17 @@ from ..research.models import ScoredStudy
 from .extraction import extract_all, studies_to_extract
 from .fulltext import fetch_missing_fulltexts
 from .assessment import OutcomeProfile, assess_outcomes
-from .models import ComparisonSpec, GradeResult, GradeStage1Result, OutcomeSpec, ReviewMap, StudyExtraction
+from .models import (
+    ComparisonSpec,
+    GradeResult,
+    GradeStage1Result,
+    OutcomeProposal,
+    OutcomeSpec,
+    ReviewMap,
+    StudyExtraction,
+)
 from .synthesis import EvidenceBody, build_bodies
-from .outcomes import StructuredCall, confirm_outcomes, propose_outcomes
+from .outcomes import StructuredCall, confirm_outcomes, normalize_comparison, normalize_outcomes, propose_outcomes
 from .reviews import ReferenceFetcher, map_reviews
 
 
@@ -62,11 +70,23 @@ def build_stage1_graph(
 
     async def node_propose(state: GradeState) -> dict[str, Any]:
         await progress("propose_outcomes", "Proposing outcomes and certainty targets")
-        outcomes, comparison = await propose_outcomes(structured_call, state["request"], state["studies"])
+        request = state["request"]
+        if request.grade_outcomes_override:
+            proposal = OutcomeProposal(
+                outcomes=[OutcomeSpec.model_validate(o) for o in request.grade_outcomes_override],
+                comparison=ComparisonSpec.model_validate(request.grade_comparison_override or {}),
+            )
+            return {"proposed_outcomes": normalize_outcomes(proposal),
+                    "proposed_comparison": normalize_comparison(proposal.comparison)}
+        outcomes, comparison = await propose_outcomes(structured_call, request, state["studies"])
         return {"proposed_outcomes": outcomes, "proposed_comparison": comparison}
 
     async def node_confirm(state: GradeState) -> dict[str, Any]:
         await progress("confirm_outcomes", "Waiting for the user to confirm the outcomes")
+        if state["request"].grade_outcomes_override:
+            return {"outcomes": state["proposed_outcomes"], "comparison": state.get("proposed_comparison"),
+                    "outcomes_confirmed_by_user": False,
+                    "notes": [*state.get("notes", []), "Outcomes fixed in advance (reference set)."]}
         outcomes, comparison, confirmed, note = await confirm_outcomes(
             state["request"], state["proposed_outcomes"], state.get("proposed_comparison")
         )

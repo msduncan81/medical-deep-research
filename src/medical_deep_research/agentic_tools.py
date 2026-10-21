@@ -454,6 +454,25 @@ async def tool_suggest_databases(request: RunRequest, bridge: AgenticEventBridge
     return {"databases": dbs}
 
 
+def is_excluded(study: Any, request: RunRequest) -> bool:
+    """True for studies the run must not use (reference-set runs exclude the target review)."""
+    if not request.exclude_ids:
+        return False
+    pmid = str(getattr(study, "pmid", "") or "")
+    doi = str(getattr(study, "doi", "") or "").lower()
+    for raw in request.exclude_ids:
+        key = str(raw).strip().lower()
+        if key and (key == pmid or (doi and key in doi)):
+            return True
+    return False
+
+
+def _drop_excluded(result: SearchProviderResult, request: RunRequest) -> SearchProviderResult:
+    if request.exclude_ids and result.studies:
+        result.studies = [s for s in result.studies if not is_excluded(s, request)]
+    return result
+
+
 async def tool_search(request: RunRequest, bridge: AgenticEventBridge, source: str, query: str, max_results: int = 15) -> dict[str, Any]:
     result = await search_source(
         source, query,
@@ -464,6 +483,7 @@ async def tool_search(request: RunRequest, bridge: AgenticEventBridge, source: s
         start_year=request.search_start_year,
         scopus_view=request.scopus_view,
     )
+    result = _drop_excluded(result, request)
     bridge.search_results.append(result)
     studies_summary = []
     for s in result.studies:
@@ -782,7 +802,7 @@ async def tool_snowball(
     target = next((s for s in pool if s.reference_number == int(reference_number)), None)
     if target is None:
         return {"error": f"No ranked study [{reference_number}] found."}
-    result = await snowball(target, direction)  # type: ignore[arg-type]
+    result = _drop_excluded(await snowball(target, direction), request)  # type: ignore[arg-type]
     bridge.search_results.append(result)
     summary = []
     for s in result.studies[:10]:
