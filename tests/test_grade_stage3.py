@@ -121,3 +121,11 @@ class PolishTests(unittest.TestCase):
         row = next(line for line in table.splitlines() if line.startswith("| PA sistólica"))
         self.assertEqual(row.count("-3,30"), 1)
         self.assertIn("DM -3,30", row)
+
+
+class NoEstimateStatementTests(unittest.TestCase):
+    def test_low_certainty_without_estimate_does_not_say_very_uncertain(self) -> None:
+        profile = _profile("o5", "Eventos adversos", 2)
+        profile["bodies"][0]["estimate"] = None
+        statement = informative_statement(profile, "AMPA", "pt")
+        self.assertTrue(statement.startswith("Não foi possível estimar o efeito de AMPA em eventos adversos"))

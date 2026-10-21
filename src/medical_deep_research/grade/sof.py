@@ -37,6 +37,7 @@ _TEMPLATES = {
                  2: "{i} pode resultar em pouca ou nenhuma diferença em {o}"},
         "very_low": "A evidência é muito incerta sobre o efeito de {i} em {o}",
         "no_evidence": "Nenhum estudo incluído relatou {o}",
+        "no_estimate": "Não foi possível estimar o efeito de {i} em {o}: os estudos não forneceram dados combináveis",
         "verbs": {"down": ("reduz", "reduzir"), "up": ("aumenta", "aumentar")},
         "large": {"down": ("reduz muito", "reduzir muito"), "up": ("aumenta muito", "aumentar muito")},
     },
@@ -47,6 +48,7 @@ _TEMPLATES = {
                  2: "{i} may result in little to no difference in {o}"},
         "very_low": "The evidence is very uncertain about the effect of {i} on {o}",
         "no_evidence": "No included study reported {o}",
+        "no_estimate": "The effect of {i} on {o} could not be estimated: the studies gave no combinable data",
         "verbs": {"down": ("reduces", "reduce"), "up": ("increases", "increase")},
         "large": {"down": ("results in a large reduction in", "result in a large reduction in"),
                   "up": ("results in a large increase in", "result in a large increase in")},
@@ -137,7 +139,7 @@ def _statement(profile: dict[str, Any], intervention: str, language: str | None)
     body = _main_body(profile)
     estimate = (body or {}).get("estimate") or {}
     if not estimate:
-        return t["very_low"].format(i=_in_sentence(intervention), o=name)
+        return t["no_estimate"].format(i=_in_sentence(intervention), o=name)
     measure, est, lo, hi = estimate["measure"], estimate["estimate"], estimate["ci_low"], estimate["ci_high"]
     null = 1.0 if measure in RATIO_MEASURES else 0.0
     if lo < null < hi:
