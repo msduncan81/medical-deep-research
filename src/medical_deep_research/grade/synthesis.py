@@ -66,6 +66,7 @@ class EvidenceBody(BaseModel):
     control_event_rate: float | None = None
     not_pooled: list[str] = Field(default_factory=list)
     derived: list[str] = Field(default_factory=list)
+    excluded_comparison: list[str] = Field(default_factory=list)
     subgroups: list[SubgroupResult] = Field(default_factory=list)
     participants_complete: bool = False
     from_review: bool = False
@@ -230,14 +231,26 @@ def build_bodies(
     outcomes: list[OutcomeSpec],
     extractions: list[StudyExtraction],
     subgroups: list[SubgroupHypothesis] | None = None,
+    covered_by: dict[int, set[int]] | None = None,
 ) -> list[EvidenceBody]:
+    """covered_by: primary study ref -> chosen reviews that include it. Per outcome, a covered trial is left
+    out when one of its reviews contributes an estimate for that outcome (no double counting)."""
     levels_by_hypothesis: dict[str, dict[int, str]] = defaultdict(dict)
+    # Studies that test a different comparison do not belong to this body of evidence (GRADE rates one
+    # comparison at a time); they are listed, not pooled.
+    excluded_refs = {e.study_ref: e.comparison_note for e in extractions if e.comparison_match == "no"}
     for extraction in extractions:
         for hypothesis_id, level in (extraction.subgroup_levels or {}).items():
             levels_by_hypothesis[hypothesis_id][extraction.study_ref] = level
     by_outcome: dict[tuple[str, str], list[StudyOutcomeData]] = defaultdict(list)
+    excluded_by_outcome: dict[str, list[str]] = defaultdict(list)
     for extraction in extractions:
         for item in extraction.items:
+            if extraction.study_ref in excluded_refs and item.reported:
+                excluded_by_outcome[item.outcome_id].append(
+                    f"[{extraction.study_ref}] different comparison: {excluded_refs[extraction.study_ref] or 'not the confirmed comparison'}"
+                )
+                continue
             group = _design_group(item)
             if item.reported and group:
                 by_outcome[(item.outcome_id, group)].append(item)
@@ -245,9 +258,25 @@ def build_bodies(
     for outcome in outcomes:
         for group in ("rct", "nrs"):
             items = by_outcome.get((outcome.id, group), [])
+            review_refs_with_effect = {
+                i.study_ref for i in by_outcome.get((outcome.id, "rct"), [])
+                if i.design == StudyDesign.SYSTEMATIC_REVIEW and i.effect is not None
+            }
+            duplicates: list[str] = []
+            if covered_by and review_refs_with_effect:
+                kept = []
+                for item in items:
+                    overlap = (covered_by.get(item.study_ref) or set()) & review_refs_with_effect
+                    if item.design != StudyDesign.SYSTEMATIC_REVIEW and overlap:
+                        duplicates.append(f"[{item.study_ref}] already pooled in review [{min(overlap)}]")
+                    else:
+                        kept.append(item)
+                items = kept
             if not items:
                 continue
-            body = EvidenceBody(outcome_id=outcome.id, design=group, items=items)
+            body = EvidenceBody(outcome_id=outcome.id, design=group, items=items,
+                                excluded_comparison=list(dict.fromkeys(excluded_by_outcome.get(outcome.id, []))))
+            body.not_pooled.extend(duplicates)
             oriented: dict[str, list[tuple[int, float, float, float]]] = defaultdict(list)
             pooled_refs: set[int] = set()
             binary = outcome.kind in ("binary", OutcomeKind.BINARY)

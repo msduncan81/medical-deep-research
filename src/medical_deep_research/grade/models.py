@@ -11,6 +11,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
+from ..research.models import ScoredStudy
+
 
 class OutcomeImportance(StrEnum):
     CRITICAL = "critical"  # GRADE importance 7-9
@@ -135,6 +137,12 @@ class StudyOutcomeData(BaseModel):
 
 class StudyExtraction(BaseModel):
     study_ref: int = 0
+    comparison_match: str = Field(
+        default="unclear",
+        description="'yes' when the study tests the confirmed intervention vs comparator, 'partial' when close "
+                    "(e.g. a variant of the intervention), 'no' when it tests a different comparison",
+    )
+    comparison_note: str = ""
     subgroup_levels: dict[str, str] = Field(
         default_factory=dict, description="subgroup hypothesis id -> level of this study (or 'unclear')"
     )
@@ -143,6 +151,9 @@ class StudyExtraction(BaseModel):
 
 class GradeStage1Result(BaseModel):
     comparison: ComparisonSpec = Field(default_factory=ComparisonSpec)
+    seeded_studies: list[ScoredStudy] = Field(
+        default_factory=list, description="Trials added from the reference lists of included reviews."
+    )
     outcomes: list[OutcomeSpec] = Field(default_factory=list)
     outcomes_confirmed_by_user: bool = False
     review_map: ReviewMap = Field(default_factory=ReviewMap)

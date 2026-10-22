@@ -3,8 +3,9 @@
 One model call per study covers all confirmed outcomes. Numbers must come verbatim from the text (a
 supporting quote is required); nothing is computed by the model. Risk of bias follows Core GRADE 4:
 each study is classified low or high (unclear when the text does not allow a judgement, e.g. abstract
-only). Primary studies already included in a chosen systematic review are not extracted again, so the
-same trial is not counted twice (Cochrane Handbook ch. V).
+only). Primary studies included in a chosen systematic review are extracted too; whether they count is
+decided so that the same trial is not counted twice (Cochrane Handbook ch. V): that is decided per outcome when the bodies are
+built, so a trial still fills in an outcome its review did not report.
 """
 
 from __future__ import annotations
@@ -52,6 +53,11 @@ Rules:
 - source_text: "fulltext" if the passage came from the full text section, else "abstract".
 - subgroup_levels (study level): for each subgroup id listed, the level this study belongs to, copied
   exactly from the listed levels, or "unclear".
+- comparison_match (study level), against the "Intervention in scope" and "comparator" given: "yes" when the
+  study compares that intervention with that comparator; "partial" when it is a close variant (e.g. a
+  different dose, a co-intervention in both arms); "no" when it tests something else (e.g. different
+  treatment targets or intensities, withdrawal of the treatment, an active comparator when the question
+  is versus placebo, a different population). Explain briefly in comparison_note.
 """
 
 
@@ -142,7 +148,6 @@ def _sanitize(item: StudyOutcomeData, study: ScoredStudy, outcome_ids: set[str])
 
 
 def studies_to_extract(studies: list[ScoredStudy], review_map: ReviewMap) -> tuple[list[ScoredStudy], list[str]]:
-    chosen_reviews = {r.review_ref for r in review_map.reviews if r.chosen}
     network_reviews = {r.review_ref for r in review_map.reviews if r.network}
     skipped_reviews = {r.review_ref for r in review_map.reviews if not r.chosen}
     selected, notes = [], []
@@ -153,9 +158,6 @@ def studies_to_extract(studies: list[ScoredStudy], review_map: ReviewMap) -> tup
             continue
         if ref in skipped_reviews:
             notes.append(f"[{ref}] not extracted: overlaps with a chosen review.")
-            continue
-        if ref in review_map.covered_by_chosen and ref not in chosen_reviews:
-            notes.append(f"[{ref}] not extracted: already included in review [{review_map.covered_by_chosen[ref]}].")
             continue
         selected.append(study)
     return selected, notes
@@ -178,7 +180,9 @@ async def extract_study(
     for hypothesis in (comparison.subgroups if comparison else []):
         value = (raw.subgroup_levels or {}).get(hypothesis.id, "unclear")
         levels[hypothesis.id] = value if value in hypothesis.levels else "unclear"
-    return StudyExtraction(study_ref=int(study.reference_number or 0), subgroup_levels=levels, items=items)
+    match = raw.comparison_match if raw.comparison_match in {"yes", "partial", "no"} else "unclear"
+    return StudyExtraction(study_ref=int(study.reference_number or 0), subgroup_levels=levels, items=items,
+                           comparison_match=match, comparison_note=raw.comparison_note[:300])
 
 
 async def extract_all(

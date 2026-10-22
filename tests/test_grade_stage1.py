@@ -88,15 +88,15 @@ class ReviewMapTests(unittest.TestCase):
 
 
 class ExtractionRulesTests(unittest.TestCase):
-    def test_covered_primaries_and_non_chosen_reviews_are_skipped(self) -> None:
+    def test_non_chosen_reviews_are_skipped_but_covered_trials_extracted(self) -> None:
         studies = [_study(1, "SR 2013 meta-analysis"), _study(2, "SR 2021 meta-analysis"),
                    _study(3, "Trial A"), _study(5, "Trial C")]
         old = ReviewCoverage(review_ref=1, title="", year=2013, covered_refs=[3])
         new = ReviewCoverage(review_ref=2, title="", year=2021, covered_refs=[3])
         selected, notes = studies_to_extract(studies, build_review_map([old, new]))
 
-        self.assertEqual([s.reference_number for s in selected], [2, 5])
-        self.assertEqual(len(notes), 2)
+        self.assertEqual([s.reference_number for s in selected], [2, 3, 5])  # covered trial 3 is extracted too
+        self.assertEqual(len(notes), 1)  # only the non-chosen overlapping review is skipped
 
     def test_numbers_without_quote_or_outside_ci_are_dropped(self) -> None:
         study = _study(7, "Trial")
@@ -156,15 +156,15 @@ class Stage1GraphTests(unittest.IsolatedAsyncioTestCase):
             return SearchProviderResult(source="snowball", query="q", studies=refs)
 
         result = await run_stage1(_request(), studies, structured_call, fetch_references, lambda _s: None,
-                                  fetch_full=None)
+                                  fetch_full=None, seed_records=None)
 
         self.assertFalse(result.outcomes_confirmed_by_user)
         self.assertEqual([o.name for o in result.outcomes], ["PA sistólica"])
         self.assertEqual(result.review_map.covered_by_chosen, {2: 1})
-        self.assertEqual(sorted(e.study_ref for e in result.extractions), [1, 3])  # trial 2 is inside the review
+        self.assertEqual(sorted(e.study_ref for e in result.extractions), [1, 2, 3])
         review_item = next(e for e in result.extractions if e.study_ref == 1).items[0]
         self.assertEqual(review_item.design, StudyDesign.SYSTEMATIC_REVIEW)
-        self.assertEqual(calls.count("grade_extraction"), 2)
+        self.assertEqual(calls.count("grade_extraction"), 3)
 
 
 class OutcomeConfirmationTests(unittest.IsolatedAsyncioTestCase):

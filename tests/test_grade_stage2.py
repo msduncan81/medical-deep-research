@@ -244,3 +244,46 @@ class ComparisonNormalizationTests(unittest.TestCase):
         self.assertEqual(len(cleaned.subgroups), 2)  # 3 kept by the cap, one dropped for a single level
         self.assertEqual(cleaned.subgroups[0].id, "s1")
         self.assertEqual(cleaned.subgroups[0].expected_larger_benefit, "")  # not one of the levels
+
+
+class ComparisonFilterAndDedupeTests(unittest.TestCase):
+    def test_different_comparison_is_excluded_from_the_body(self) -> None:
+        extractions = [StudyExtraction(study_ref=1, comparison_match="yes", items=[_item(1, -3, -5, -1)]),
+                       StudyExtraction(study_ref=2, comparison_match="no", comparison_note="intensive vs standard target",
+                                       items=[_item(2, 5, 3, 7)])]
+        body = build_bodies([SBP], extractions)[0]
+        self.assertEqual(body.refs, [1])
+        self.assertIn("intensive vs standard target", body.excluded_comparison[0])
+
+    def test_trial_inside_a_review_counts_only_for_outcomes_the_review_lacks(self) -> None:
+        review = StudyExtraction(study_ref=10, items=[
+            _item(10, -3, -4, -2, design=StudyDesign.SYSTEMATIC_REVIEW)])          # review reports SBP only
+        trial = StudyExtraction(study_ref=11, items=[
+            _item(11, -4, -6, -2), _item(11, 1.4, 1.1, 1.8, "RR", outcome="o2")])  # trial reports SBP and control
+        bodies = build_bodies([SBP, CONTROL], [review, trial], covered_by={11: {10}})
+        sbp = next(b for b in bodies if b.outcome_id == "o1")
+        control = next(b for b in bodies if b.outcome_id == "o2")
+        self.assertEqual(sbp.refs, [10])
+        self.assertIn("already pooled in review [10]", sbp.not_pooled[0])
+        self.assertEqual(control.refs, [11])
+
+
+class SeedSelectionTests(unittest.TestCase):
+    def test_trial_like_references_not_in_pool_most_cited_first(self) -> None:
+        from medical_deep_research.grade.seed import select_seed_candidates
+        from medical_deep_research.research.models import EvidenceStudy, ScoredStudy
+
+        def ev(pmid: str, title: str) -> EvidenceStudy:
+            return EvidenceStudy(source="x", source_id=pmid, title=title, pmid=pmid)
+
+        pool = [ScoredStudy(source="x", source_id="p", title="Already here randomized trial", pmid="1",
+                            evidence_level_score=0, citation_score=0, recency_score=0, composite_score=0, reference_number=1)]
+        refs = {
+            5: [ev("1", "Already here randomized trial"), ev("2", "SHEP randomized placebo-controlled trial"),
+                ev("3", "A meta-analysis of everything"), ev("4", "Cohort of elderly people")],
+            6: [ev("2", "SHEP randomized placebo-controlled trial"), ev("7", "Syst-Eur double-blind trial"),
+                ev("4", "Cohort of elderly people"), ev("9", "Excluded Cochrane review trial")],
+        }
+        candidates, cited_by = select_seed_candidates(refs, pool, lambda s: s.pmid == "9")
+        self.assertEqual([c.pmid for c in candidates], ["2", "4", "7"])  # 2 cited twice; 4 cited twice; 7 trial
+        self.assertEqual(cited_by["pmid:2"], {5, 6})

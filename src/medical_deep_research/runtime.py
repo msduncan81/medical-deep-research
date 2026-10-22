@@ -5679,7 +5679,7 @@ class LangChainLocalRuntime(NativeSDKRuntime):
             from .grade.report import build_grade_report, report_issues
 
             report, report_notes = await build_grade_report(
-                structured_call, result, request, list(bridge.ranked_studies)
+                structured_call, result, request, [*bridge.ranked_studies, *result.seeded_studies]
             )
             issues = report_issues(report, result, request)
             bridge._intermediate["grade_report"] = report

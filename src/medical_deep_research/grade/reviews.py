@@ -138,12 +138,14 @@ async def map_reviews(
     fetch_references: ReferenceFetcher,
     *,
     concurrency: int = 3,
-) -> ReviewMap:
+) -> tuple[ReviewMap, dict[int, list[EvidenceStudy]]]:
+    """Return the review map and the reference list fetched for each review (by its reference number)."""
     reviews_in_pool = [s for s in studies if is_systematic_review(s)]
     primaries = [s for s in studies if not is_systematic_review(s)]
     if not reviews_in_pool:
-        return ReviewMap(notes=["No systematic reviews among the included studies."])
+        return ReviewMap(notes=["No systematic reviews among the included studies."]), {}
     semaphore = asyncio.Semaphore(concurrency)
+    references_by_review: dict[int, list[EvidenceStudy]] = {}
 
     async def coverage(review: ScoredStudy) -> ReviewCoverage:
         async with semaphore:
@@ -152,6 +154,7 @@ async def map_reviews(
                 references = list(result.studies)
             except Exception:  # noqa: BLE001 - a missing reference list must not stop the graph
                 references = []
+        references_by_review[int(review.reference_number or 0)] = references
         return ReviewCoverage(
             review_ref=int(review.reference_number or 0),
             title=review.title or "",
@@ -162,4 +165,4 @@ async def map_reviews(
         )
 
     coverages = await asyncio.gather(*(coverage(r) for r in reviews_in_pool))
-    return build_review_map(list(coverages))
+    return build_review_map(list(coverages)), references_by_review

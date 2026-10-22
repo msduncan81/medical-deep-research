@@ -86,6 +86,7 @@ class BodyAssessment(BaseModel):
     holistic_b: HolisticOutput = Field(default_factory=HolisticOutput)
     coherence_flags: list[str] = Field(default_factory=list)
     not_pooled: list[str] = Field(default_factory=list)
+    excluded_comparison: list[str] = Field(default_factory=list)
     subgroups: list[dict[str, Any]] = Field(default_factory=list)
 
 
@@ -284,6 +285,7 @@ async def assess_body(
         estimate=pooled.model_dump(exclude={"study_estimates"}) if pooled else None,
         domains=domains, certainty_computed=computed, certainty_a=certainty_a, adjustment_a=adjustment,
         certainty_b=certainty_b, holistic_b=holistic, coherence_flags=flags, not_pooled=body.not_pooled,
+        excluded_comparison=body.excluded_comparison,
         subgroups=[g.model_dump() | {"credible": g.credible} for g in body.subgroups],
     )
 
